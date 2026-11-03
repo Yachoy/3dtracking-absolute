@@ -115,3 +115,34 @@ def pitch_from_positions(track: dict[int, np.ndarray], frame: int, span: int = 4
         if horizontal > 1e-6:
             return math.degrees(math.atan2(d[2], horizontal))
     return 0.0
+
+
+def anchor_offset(model: "VehicleModel") -> np.ndarray:
+    """Смещение центра габаритного бокса от якоря в локальных координатах (см).
+
+    Якорь модели — передний нижний центр, части лежат в отрицательных X.
+    Центр объединения частей — это то, что даёт центр 2D-бокса детектора.
+    """
+    xs = [p.x_from for p in model.parts] + [p.x_to for p in model.parts]
+    zs = [p.z_from for p in model.parts] + [p.z_to for p in model.parts]
+    return np.array([(min(xs) + max(xs)) / 2.0, 0.0, (min(zs) + max(zs)) / 2.0])
+
+
+def to_anchor(points: dict[int, np.ndarray], offset: np.ndarray, span: int = 3) -> dict[int, np.ndarray]:
+    """Центр бокса → якорь: сдвиг на `offset`, повёрнутый по курсу движения.
+
+    Курс берётся из соседних точек, поэтому на первом кадре сдвиг не
+    применяется (там курс неизвестен).
+    """
+    frames = sorted(points)
+    out: dict[int, np.ndarray] = {}
+    for i, f in enumerate(frames):
+        lo, hi = max(0, i - span), min(len(frames) - 1, i + span)
+        if hi == lo:
+            out[f] = points[f].copy()
+            continue
+        heading = float(np.degrees(np.arctan2(*(points[frames[hi]] - points[frames[lo]])[[1, 0]])))
+        fwd = np.array([np.cos(np.radians(heading)), np.sin(np.radians(heading)), 0.0])
+        up = np.array([0.0, 0.0, 1.0])
+        out[f] = points[f] - (fwd * offset[0] + up * offset[2])
+    return out

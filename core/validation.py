@@ -53,6 +53,17 @@ class Prediction:
     meta: dict = field(default_factory=dict)
 
 
+def _json_default(obj):
+    """numpy-типы в JSON: массивы и скаляры из метаданных экспериментов."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, dict):
+        return {str(k): _json_default(v) for k, v in obj.items()}
+    return str(obj)
+
+
 def _text(img, text, org, scale=0.5, color=TEXT, thickness=1):
     cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
 
@@ -71,6 +82,20 @@ def _draw_boxes(img, box, color, label=None, scale=(1.0, 1.0), label_at="top"):
     if label:
         ty = max(36, y0 - 5) if label_at == "top" else min(img.shape[0] - 5, y1 + 15)
         _text(img, label, (x0 + 3, ty), 0.45, color, 1)
+
+
+def _draw_rect(img, rect, color, label=None, scale=(1.0, 1.0)):
+    """Повернутый прямоугольник (cx, cy, w, h, angle) из детекции."""
+    if rect is None:
+        return
+    cx, cy, w, h, angle = rect
+    cx, cy = cx * scale[0], cy * scale[1]
+    w, h = w * scale[0], h * scale[1]
+    pts = cv2.boxPoints(((cx, cy), (w, h), angle)).astype(np.int32)
+    cv2.polylines(img, [pts.reshape(-1, 1, 2)], True, color, 2, cv2.LINE_AA)
+    if label:
+        x0, y0 = pts[:, 0].min(), pts[:, 1].min()
+        _text(img, label, (int(x0) + 3, max(36, int(y0) - 5)), 0.45, color, 1)
 
 
 def _draw_error_chart(w, h, frames, errors, current, summary) -> np.ndarray:
@@ -154,13 +179,13 @@ class Validator:
             self._render_video(frames, gt, pred, table, summary)
 
         self._write_reports(table, summary)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        print(json.dumps({k: v for k, v in summary.items() if k != "meta"}, ensure_ascii=False, indent=2))
         return summary
 
     # --------------------------------------------------------------- отчёты
     def _write_reports(self, table: ErrorTable, summary: dict) -> None:
         (self.out_dir / "metrics.json").write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8"
         )
         rows = table.as_rows()
         if rows:
@@ -252,7 +277,10 @@ class Validator:
                 scale = (TILE_W / scene.width, TILE_H / scene.height)
                 for i, box in enumerate(self.model.boxes_2d(cam, gt_pt, h_gt, p_gt)):
                     _draw_boxes(tile, box, GT_COLOR, "GT" if i == 0 else None, scale, "bottom")
-                if pred_pt is not None:
+                detected = pred.meta.get("boxes", {}).get(frame, {}).get(cam_idx)
+                if detected is not None:
+                    _draw_rect(tile, detected, PRED_COLOR, "DET", scale)
+                elif pred_pt is not None:
                     for i, box in enumerate(self.model.boxes_2d(cam, pred_pt, h_pred, p_pred)):
                         _draw_boxes(tile, box, PRED_COLOR, "PRED" if i == 0 else None, scale, "top")
 
@@ -288,7 +316,7 @@ class Validator:
             _text(panel, "RUN", (14, 240), 0.42, MUTED)
             _text(panel, f"RMSE {s.get('rmse_m', float('nan')):.2f}  p95 {s.get('p95_m', float('nan')):.2f}", (14, 260), 0.44, TEXT)
             _text(panel, f"median {s.get('median_m', float('nan')):.2f}   n={s.get('n', 0)}", (14, 280), 0.44, TEXT)
-            _text(panel, "green = GT 2D    red = prediction", (14, 312), 0.38, MUTED)
+            _text(panel, "green = GT 2D    red = detection/prediction", (14, 312), 0.38, MUTED)
             canvas[y : y + TILE_H, x : x + TILE_W] = panel
 
             writer.write(canvas)
