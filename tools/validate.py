@@ -39,10 +39,15 @@ def main() -> int:
     ap.add_argument("--video-offset", type=int, default=0, help="сдвиг кадра видео относительно CSV")
     ap.add_argument("--max-frames", type=int, default=None)
     ap.add_argument("--no-video", action="store_true", help="только метрики, без рендера")
+    ap.add_argument("--gt-points", action="store_true",
+                    help="на камерах только GT-точка и выход трекера, без проекции модели")
+    ap.add_argument("--smooth", type=int, default=15, help="окно сглаживания графика ошибки, кадров")
     ap.add_argument("--pitch", action="store_true", help="наклонять бокс по уклону траектории")
     ap.add_argument("--param", action="append", default=[], metavar="K=V",
                     help="параметр эксперимента (можно несколько раз)")
     ap.add_argument("--tag", default="", help="суффикс к имени эксперимента в out/")
+    ap.add_argument("--workers", type=int, default=0,
+                    help="процессов на камеры (0 — по числу камер и ядер)")
     args = ap.parse_args()
 
     scene = load_scene(args.data)
@@ -50,6 +55,8 @@ def main() -> int:
     for item in args.param:
         key, _, raw = item.partition("=")
         kwargs[key.strip()] = _coerce(raw.strip())
+    if args.workers:
+        kwargs["workers"] = args.workers
     exp = EXPERIMENTS[args.exp](sigma_px=args.sigma_px, **kwargs)
     if args.tag:
         exp.name = f"{exp.name}-{args.tag}"
@@ -63,6 +70,8 @@ def main() -> int:
         out_dir=args.out,
         max_frames=args.max_frames,
         use_pitch=args.pitch,
+        gt_boxes=not args.gt_points,
+        smooth=args.smooth,
     )
     validator.run(pred, render_video=not args.no_video)
     return 0

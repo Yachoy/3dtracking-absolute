@@ -98,45 +98,107 @@ def _draw_rect(img, rect, color, label=None, scale=(1.0, 1.0)):
         _text(img, label, (int(x0) + 3, max(36, int(y0) - 5)), 0.45, color, 1)
 
 
-def _draw_error_chart(w, h, frames, errors, current, summary) -> np.ndarray:
+def _draw_cross(img, uv, color, label=None, size=11):
+    u, v = int(round(uv[0])), int(round(uv[1]))
+    if 0 <= u < img.shape[1] and 0 <= v < img.shape[0]:
+        cv2.drawMarker(img, (u, v), (0, 0, 0), cv2.MARKER_CROSS, size + 6, 3, cv2.LINE_AA)
+        cv2.drawMarker(img, (u, v), color, cv2.MARKER_CROSS, size + 6, 1, cv2.LINE_AA)
+        if label:
+            _text(img, label, (u + size + 4, v - size - 2), 0.4, color, 1)
+
+
+def _draw_off_border(img, uv, color, label="off"):
+    h, w = img.shape[:2]
+    u = int(np.clip(uv[0], 6, w - 6))
+    v = int(np.clip(uv[1], 6, h - 6))
+    cv2.circle(img, (u, v), 10, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.circle(img, (u, v), 10, color, 1, cv2.LINE_AA)
+    _text(img, label, (u + 12, v + 4), 0.4, color, 1)
+
+
+def _rolling_median(values, window=15):
+    out = np.full(len(values), np.nan)
+    for i in range(len(values)):
+        seg = values[max(0, i - window + 1): i + 1]
+        seg = seg[np.isfinite(seg)]
+        if seg.size:
+            out[i] = float(np.median(seg))
+    return out
+
+
+def _draw_error_chart(w, h, frames, errors, current, summary, smooth=15) -> np.ndarray:
     img = np.full((h, w, 3), BG, dtype=np.uint8)
-    _text(img, "3D ERROR vs GT (m)", (12, 20), 0.5, TEXT)
-    plot = (50, 40, w - 20, h - 34)
-    x0, y0, x1, y1 = plot
-    cv2.rectangle(img, (x0, y0), (x1, y1), (60, 60, 64), 1)
-
-    vals = np.array([e if np.isfinite(e) else np.nan for e in errors])
-    finite = vals[np.isfinite(vals)]
-    if finite.size:
-        vmax = max(0.5, float(np.nanpercentile(finite, 99)) * 1.15)
-    else:
-        vmax = 1.0
-    _text(img, f"{vmax:.1f}", (8, y0 + 5), 0.38, MUTED)
-    _text(img, "0", (8, y1 + 3), 0.38, MUTED)
-
+    vals = np.array([e if np.isfinite(e) else np.nan for e in errors], dtype=float)
     n = len(frames)
-    if n > 1:
-        fmin, fmax = frames[0], frames[-1]
-        span = max(fmax - fmin, 1)
-        pts = []
-        for f, v in zip(frames, vals):
-            if not np.isfinite(v):
-                pts.append(None)
-                continue
-            x = int(x0 + (f - fmin) / span * (x1 - x0))
-            y = int(y1 - min(v / vmax, 1.0) * (y1 - y0))
-            pts.append((x, y))
-        for a, b in zip(pts, pts[1:]):
-            if a and b:
-                cv2.line(img, a, b, (90, 160, 240), 1, cv2.LINE_AA)
-        idx = min(range(n), key=lambda i: abs(frames[i] - current))
-        if pts[idx]:
-            cv2.circle(img, pts[idx], 4, (240, 200, 90), -1, cv2.LINE_AA)
+    split = int(h * 0.64)
 
-    s = summary
-    _text(img, f"RMSE {s.get('rmse_m', float('nan')):.2f}   med {s.get('median_m', float('nan')):.2f}   "
-              f"p95 {s.get('p95_m', float('nan')):.2f}   max {s.get('max_m', float('nan')):.2f}",
-          (x0, h - 8), 0.45, TEXT)
+    # ---------------- верх: ошибка по кадрам, шум + сглаженная медиана
+    _text(img, "3D ERROR vs GT (m)", (12, 18), 0.46, TEXT)
+    x0, y0, x1, y1 = 46, 30, w - 16, split - 14
+    cv2.rectangle(img, (x0, y0), (x1, y1), (58, 58, 62), 1)
+    finite = vals[np.isfinite(vals)]
+    vmax = max(0.5, float(np.nanpercentile(finite, 99)) * 1.2) if finite.size else 1.0
+    _text(img, f"{vmax:.1f}", (8, y0 + 5), 0.36, MUTED)
+    _text(img, "0", (8, y1 + 3), 0.36, MUTED)
+
+    span = max(frames[-1] - frames[0], 1) if n > 1 else 1
+
+    def to_px(f, v):
+        return (
+            int(x0 + (f - frames[0]) / span * (x1 - x0)),
+            int(y1 - min(v / vmax, 1.0) * (y1 - y0)),
+        )
+
+    raw = [None if not np.isfinite(v) else to_px(f, v) for f, v in zip(frames, vals)]
+    for a, b in zip(raw, raw[1:]):
+        if a and b:
+            cv2.line(img, a, b, (92, 92, 100), 1, cv2.LINE_AA)
+
+    smooth_vals = _rolling_median(vals, smooth) if smooth > 1 else vals
+    sm = [None if not np.isfinite(v) else to_px(f, v) for f, v in zip(frames, smooth_vals)]
+    for a, b in zip(sm, sm[1:]):
+        if a and b:
+            cv2.line(img, a, b, (70, 170, 250), 2, cv2.LINE_AA)
+
+    median = summary.get("median_m", float("nan"))
+    if np.isfinite(median):
+        my = int(y1 - min(median / vmax, 1.0) * (y1 - y0))
+        for xx in range(x0, x1, 16):
+            cv2.line(img, (xx, my), (min(xx + 8, x1), my), (110, 210, 110), 1, cv2.LINE_AA)
+        _text(img, f"median {median:.2f}", (x1 - 96, my - 5), 0.36, (110, 210, 110))
+
+    if n:
+        idx = min(range(n), key=lambda i: abs(frames[i] - current))
+        if raw[idx]:
+            cv2.circle(img, raw[idx], 4, (240, 200, 90), -1, cv2.LINE_AA)
+            cv2.line(img, (raw[idx][0], y0), (raw[idx][0], y1), (80, 105, 135), 1)
+
+    # ---------------- низ: RMSE по десяти отрезкам ролика
+    _text(img, "RMSE by 10% of the run (m)", (12, split + 8), 0.4, MUTED)
+    seg_n = 10
+    per = max(1, n // seg_n)
+    base_y, top_y = h - 22, split + 18
+    seg_rmse = []
+    for k in range(seg_n):
+        chunk = vals[k * per:(k + 1) * per] if k < seg_n - 1 else vals[k * per:]
+        chunk = chunk[np.isfinite(chunk)]
+        seg_rmse.append(float(np.sqrt(np.mean(chunk**2))) if chunk.size else 0.0)
+    smax = max(seg_rmse + [1e-9])
+    cur_seg = -1
+    if n:
+        idx = min(range(n), key=lambda i: abs(frames[i] - current))
+        cur_seg = min(idx // per, seg_n - 1)
+    for k, value in enumerate(seg_rmse):
+        bx0 = int(46 + k * (w - 62) / seg_n) + 2
+        bx1 = int(46 + (k + 1) * (w - 62) / seg_n) - 2
+        by = int(base_y - (value / smax) * (base_y - top_y))
+        color = (70, 170, 250) if k == cur_seg else (92, 110, 140)
+        cv2.rectangle(img, (bx0, by), (bx1, base_y), color, -1)
+        if value > 0:
+            _text(img, f"{value:.1f}", (bx0, by - 3), 0.28, MUTED)
+
+    _text(img, f"grey = per frame   orange = running median ({smooth})   bars = RMSE per segment",
+          (12, h - 5), 0.32, MUTED)
     return img
 
 
@@ -152,6 +214,8 @@ class Validator:
         out_dir: str | Path = "out",
         max_frames: int | None = None,
         use_pitch: bool = False,
+        gt_boxes: bool = True,
+        smooth: int = 15,
     ) -> None:
         self.scene = scene
         self.experiment_name = experiment_name
@@ -161,6 +225,10 @@ class Validator:
         self.max_frames = max_frames
         # наклон бокса по уклону траектории: GT-Z шумный, по умолчанию выключен
         self.use_pitch = use_pitch
+        # True  — на камерах рисуется проекция модели вокруг GT (наглядно, но это не детекция);
+        # False — только известная GT-точка и выход трекера (для экспериментов с SOT).
+        self.gt_boxes = gt_boxes
+        self.smooth = int(smooth)
 
     # ------------------------------------------------------------------ run
     def run(self, pred: Prediction, render_video: bool = True) -> dict:
@@ -245,7 +313,7 @@ class Validator:
             _text(canvas, f"{self.experiment_name}   frame {frame}   t={frame / scene.fps:5.2f}s", (12, 28), 0.55, TEXT)
 
             err = table.errors[k] if k < len(table.errors) else float("nan")
-            chart = _draw_error_chart(LEFT_W, chart_h, chart_frames, chart_errors, frame, summary)
+            chart = _draw_error_chart(LEFT_W, chart_h, chart_frames, chart_errors, frame, summary, self.smooth)
             canvas[40 + scene3d.h + PAD : CANVAS_H - 40, 0:LEFT_W] = chart[: CANVAS_H - 40 - (40 + scene3d.h + PAD), :]
 
             # ---- правая часть: камеры
@@ -268,21 +336,31 @@ class Validator:
 
                 gt_pt = gt_track[frame]
                 pred_pt = pred_track.get(frame)
+                scale = (TILE_W / scene.width, TILE_H / scene.height)
+
                 h_gt = heading_from_positions(gt_track, frame)
                 p_gt = pitch_from_positions(gt_track, frame) if self.use_pitch else 0.0
-                h_pred = heading_from_positions(pred_track, frame) if pred_pt is not None else h_gt
-                p_pred = (
-                    pitch_from_positions(pred_track, frame) if (pred_pt is not None and self.use_pitch) else p_gt
-                )
-                scale = (TILE_W / scene.width, TILE_H / scene.height)
-                for i, box in enumerate(self.model.boxes_2d(cam, gt_pt, h_gt, p_gt)):
-                    _draw_boxes(tile, box, GT_COLOR, "GT" if i == 0 else None, scale, "bottom")
-                detected = pred.meta.get("boxes", {}).get(frame, {}).get(cam_idx)
-                if detected is not None:
-                    _draw_rect(tile, detected, PRED_COLOR, "DET", scale)
+
+                # известная точка (то, что трекерят) — перекрестие в её проекции
+                gt_uv, gt_depth = cam.project(gt_pt)
+                gt_uv = gt_uv[0] * np.array(scale)
+                if self.gt_boxes:
+                    for i, box in enumerate(self.model.boxes_2d(cam, gt_pt, h_gt, p_gt)):
+                        _draw_boxes(tile, box, GT_COLOR, "GT" if i == 0 else None, scale, "bottom")
+                elif gt_depth[0] > 0 and 0 <= gt_uv[0] < TILE_W and 0 <= gt_uv[1] < TILE_H:
+                    _draw_cross(tile, gt_uv, GT_COLOR, "GT")
+                else:
+                    _draw_off_border(tile, gt_uv, GT_COLOR, "GT off")
+
+                # выход трекера: рамка, которую он ведёт; иначе — точка предсказания
+                box = pred.meta.get("boxes", {}).get(frame, {}).get(cam_idx)
+                if box is not None:
+                    _draw_boxes(tile, box, PRED_COLOR, "TRK", scale, "top")
                 elif pred_pt is not None:
-                    for i, box in enumerate(self.model.boxes_2d(cam, pred_pt, h_pred, p_pred)):
-                        _draw_boxes(tile, box, PRED_COLOR, "PRED" if i == 0 else None, scale, "top")
+                    p_uv, p_depth = cam.project(pred_pt)
+                    p_uv = p_uv[0] * np.array(scale)
+                    if p_depth[0] > 0 and 0 <= p_uv[0] < TILE_W and 0 <= p_uv[1] < TILE_H:
+                        _draw_cross(tile, p_uv, PRED_COLOR, "pred", size=7)
 
                 dist = cam.distance(gt_pt) / 100.0
                 vis = cam.project(gt_pt)[0]
@@ -316,7 +394,7 @@ class Validator:
             _text(panel, "RUN", (14, 240), 0.42, MUTED)
             _text(panel, f"RMSE {s.get('rmse_m', float('nan')):.2f}  p95 {s.get('p95_m', float('nan')):.2f}", (14, 260), 0.44, TEXT)
             _text(panel, f"median {s.get('median_m', float('nan')):.2f}   n={s.get('n', 0)}", (14, 280), 0.44, TEXT)
-            _text(panel, "green = GT 2D    red = detection/prediction", (14, 312), 0.38, MUTED)
+            _text(panel, "green = GT point    red = tracker output", (14, 312), 0.38, MUTED)
             canvas[y : y + TILE_H, x : x + TILE_W] = panel
 
             writer.write(canvas)
