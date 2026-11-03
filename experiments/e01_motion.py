@@ -65,6 +65,8 @@ class MotionTriangulation(Experiment):
         aspect_range: tuple[float, float] = (0.45, 5.0),
         anchor_correct: bool = True,
         anchor_span: int = 12,
+        answer_fwd_m: float | None = None,
+        answer_up_m: float | None = None,
     ) -> None:
         self.threshold = int(threshold)
         self.min_area = float(min_area)
@@ -80,6 +82,10 @@ class MotionTriangulation(Experiment):
         self.aspect_range = aspect_range
         self.anchor_correct = bool(anchor_correct)
         self.anchor_span = int(anchor_span)
+        # калиброванное смещение «измеренная точка -> точка-ответ»;
+        # None — брать из габаритов модели (передний нижний центр)
+        self.answer_fwd_m = None if answer_fwd_m is None else float(answer_fwd_m)
+        self.answer_up_m = float(answer_up_m or 0.0)
 
     # ------------------------------------------------------------------
     def _candidates(self, detections: list[Detection], gate: np.ndarray | None) -> list[Detection]:
@@ -178,7 +184,13 @@ class MotionTriangulation(Experiment):
                 velocity = 0.6 * velocity + 0.4 * step
             last_point, last_frame = point, frame
 
-        xyz = to_anchor(xyz_center, anchor_offset(VehicleModel()), span=self.anchor_span) if self.anchor_correct else xyz_center
+        if self.anchor_correct and self.answer_fwd_m is not None:
+            offset = np.array([-self.answer_fwd_m * 100.0, 0.0, -self.answer_up_m * 100.0])
+            xyz = to_anchor(xyz_center, offset, span=self.anchor_span)
+        elif self.anchor_correct:
+            xyz = to_anchor(xyz_center, anchor_offset(VehicleModel()), span=self.anchor_span)
+        else:
+            xyz = xyz_center
 
         return Prediction(
             name=self.name,

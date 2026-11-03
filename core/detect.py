@@ -68,6 +68,18 @@ class Detection:
     def size(self) -> tuple[float, float]:
         return float(self.box[2] - self.box[0]), float(self.box[3] - self.box[1])
 
+    @property
+    def ground_point(self) -> np.ndarray:
+        """Середина нижнего края повернутого прямоугольника — где объект касается земли."""
+        c = self.corners()
+        mids = [(c[i] + c[(i + 1) % 4]) / 2.0 for i in range(4)]
+        return max(mids, key=lambda m: m[1])
+
+    @property
+    def vertical_extent(self) -> float:
+        c = self.corners()
+        return float(c[:, 1].max() - c[:, 1].min())
+
     def corners(self) -> np.ndarray:
         """Четыре угла повернутого прямоугольника."""
         cx, cy, w, h, angle = self.rect

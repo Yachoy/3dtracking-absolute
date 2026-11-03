@@ -17,6 +17,19 @@ from core.validation import Validator  # noqa: E402
 from experiments import EXPERIMENTS  # noqa: E402
 
 
+def _coerce(raw: str):
+    """Строка из CLI -> bool / int / float / str."""
+    low = raw.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    for cast in (int, float):
+        try:
+            return cast(raw)
+        except ValueError:
+            pass
+    return raw
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--exp", default="e00_oracle", choices=sorted(EXPERIMENTS))
@@ -27,10 +40,19 @@ def main() -> int:
     ap.add_argument("--max-frames", type=int, default=None)
     ap.add_argument("--no-video", action="store_true", help="только метрики, без рендера")
     ap.add_argument("--pitch", action="store_true", help="наклонять бокс по уклону траектории")
+    ap.add_argument("--param", action="append", default=[], metavar="K=V",
+                    help="параметр эксперимента (можно несколько раз)")
+    ap.add_argument("--tag", default="", help="суффикс к имени эксперимента в out/")
     args = ap.parse_args()
 
     scene = load_scene(args.data)
-    exp = EXPERIMENTS[args.exp](sigma_px=args.sigma_px)
+    kwargs = {}
+    for item in args.param:
+        key, _, raw = item.partition("=")
+        kwargs[key.strip()] = _coerce(raw.strip())
+    exp = EXPERIMENTS[args.exp](sigma_px=args.sigma_px, **kwargs)
+    if args.tag:
+        exp.name = f"{exp.name}-{args.tag}"
     print(f"эксперимент {args.exp}: кадров GT {len(scene.target)}, камер {len(scene.cameras)}")
     pred = exp.run(scene)
 
