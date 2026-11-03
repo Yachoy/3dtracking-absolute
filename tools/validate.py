@@ -26,6 +26,7 @@ def main() -> int:
     ap.add_argument("--video-offset", type=int, default=0, help="сдвиг кадра видео относительно CSV")
     ap.add_argument("--max-frames", type=int, default=None)
     ap.add_argument("--no-video", action="store_true", help="только метрики, без рендера")
+    ap.add_argument("--pitch", action="store_true", help="наклонять бокс по уклону траектории")
     args = ap.parse_args()
 
     scene = load_scene(args.data)
@@ -39,6 +40,7 @@ def main() -> int:
         video_offset=args.video_offset,
         out_dir=args.out,
         max_frames=args.max_frames,
+        use_pitch=args.pitch,
     )
     validator.run(pred, render_video=not args.no_video)
     return 0

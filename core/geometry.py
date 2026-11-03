@@ -26,12 +26,21 @@ def euler_basis(roll: float, pitch: float, yaw: float) -> tuple[np.ndarray, np.n
     return forward, right, down
 
 
-def box_corners(center: np.ndarray, yaw_deg: float, size: tuple[float, float, float]) -> np.ndarray:
-    """8 углов 3D-бокса (см). size = (длина, ширина, высота)."""
+def oriented_basis(yaw_deg: float, pitch_deg: float = 0.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Базис объекта: (вперёд, вправо, вверх) с наклоном по курсу и уклону дороги."""
     y = np.radians(yaw_deg)
-    fwd = np.array([np.cos(y), np.sin(y), 0.0])
+    p = np.radians(pitch_deg)
+    fwd = np.array([np.cos(p) * np.cos(y), np.cos(p) * np.sin(y), np.sin(p)])
     right = np.array([-np.sin(y), np.cos(y), 0.0])
-    up = np.array([0.0, 0.0, 1.0])
+    up = np.cross(fwd, right)
+    return fwd, right / np.linalg.norm(right), up / np.linalg.norm(up)
+
+
+def box_corners(
+    center: np.ndarray, yaw_deg: float, size: tuple[float, float, float], pitch_deg: float = 0.0
+) -> np.ndarray:
+    """8 углов 3D-бокса (см). size = (длина, ширина, высота)."""
+    fwd, right, up = oriented_basis(yaw_deg, pitch_deg)
     corners = []
     for a in (-0.5, 0.5):
         for b in (-0.5, 0.5):

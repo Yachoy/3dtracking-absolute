@@ -26,7 +26,7 @@ import numpy as np
 from .camera import Camera
 from .dataset import Scene
 from .metrics import ErrorTable, build_errors
-from .object_model import ObjectModel, heading_from_positions
+from .object_model import ObjectModel, heading_from_positions, pitch_from_positions
 from .scene3d import BG, GREEN, RED, Scene3D, WHITE
 
 CANVAS_W, CANVAS_H = 1920, 1080
@@ -126,6 +126,7 @@ class Validator:
         video_offset: int = 0,
         out_dir: str | Path = "out",
         max_frames: int | None = None,
+        use_pitch: bool = False,
     ) -> None:
         self.scene = scene
         self.experiment_name = experiment_name
@@ -133,6 +134,8 @@ class Validator:
         self.video_offset = video_offset
         self.out_dir = Path(out_dir) / experiment_name
         self.max_frames = max_frames
+        # наклон бокса по уклону траектории: GT-Z шумный, по умолчанию выключен
+        self.use_pitch = use_pitch
 
     # ------------------------------------------------------------------ run
     def run(self, pred: Prediction, render_video: bool = True) -> dict:
@@ -241,11 +244,17 @@ class Validator:
                 gt_pt = gt_track[frame]
                 pred_pt = pred_track.get(frame)
                 h_gt = heading_from_positions(gt_track, frame)
+                p_gt = pitch_from_positions(gt_track, frame) if self.use_pitch else 0.0
                 h_pred = heading_from_positions(pred_track, frame) if pred_pt is not None else h_gt
+                p_pred = (
+                    pitch_from_positions(pred_track, frame) if (pred_pt is not None and self.use_pitch) else p_gt
+                )
                 scale = (TILE_W / scene.width, TILE_H / scene.height)
-                _draw_boxes(tile, self.model.box_2d(cam, gt_pt, h_gt), GT_COLOR, "GT", scale, "bottom")
+                for i, box in enumerate(self.model.boxes_2d(cam, gt_pt, h_gt, p_gt)):
+                    _draw_boxes(tile, box, GT_COLOR, "GT" if i == 0 else None, scale, "bottom")
                 if pred_pt is not None:
-                    _draw_boxes(tile, self.model.box_2d(cam, pred_pt, h_pred), PRED_COLOR, "PRED", scale)
+                    for i, box in enumerate(self.model.boxes_2d(cam, pred_pt, h_pred, p_pred)):
+                        _draw_boxes(tile, box, PRED_COLOR, "PRED" if i == 0 else None, scale, "top")
 
                 dist = cam.distance(gt_pt) / 100.0
                 vis = cam.project(gt_pt)[0]
