@@ -3,6 +3,7 @@
 Трекер прогоняется прямо здесь, кадр за кадром (онлайн), чтобы показать, какие рамки он взял.
 
     python -m tools.demo_video data/test --out out/demo.mp4
+    python -m tools.demo_video data/test --flow --out out/demo_flow.mp4   # + рамки потока
 """
 import argparse
 
@@ -10,16 +11,16 @@ import cv2
 import imageio_ffmpeg
 import numpy as np
 
-from run import CONFIG_FILE, detections_by_frame
+from run import detections_by_frame, load_config
 from tracker.camera import SENSOR_W_MM, load_cameras, load_ground_truth, video_path
-from tracker.online import OnlineTracker3D, TrackerConfig
+from tracker.online import OnlineTracker3D
 
 W, H = 1920, 1080
 MAP_W = 960                      # левая половина — карта
 TILE_W, TILE_H = 480, 270        # 5 камер сеткой 2x3 справа, 6-я ячейка + низ — инфо
 SCALE = TILE_W / 1920
 
-GREEN, RED, YELLOW, ORANGE = (60, 200, 60), (40, 40, 230), (0, 220, 255), (0, 140, 255)
+GREEN, RED, YELLOW, ORANGE, CYAN = (60, 200, 60), (40, 40, 230), (0, 220, 255), (0, 140, 255), (230, 220, 60)
 WHITE, GREY, DARK, CAM_BLUE = (240, 240, 240), (120, 120, 120), (28, 28, 28), (230, 160, 60)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -75,8 +76,10 @@ def draw_tile(frame_img, pose, dets, used, gt_pt, pred_pt, idx):
     for d in dets:
         x1, y1, x2, y2 = (d.box * SCALE).astype(int)
         is_used = any(d is u for u in used)
-        cv2.rectangle(tile, (x1, y1), (x2, y2), ORANGE if is_used else YELLOW, 3 if is_used else 1)
-        cv2.putText(tile, f"{d.conf:.2f}", (x1, max(y1 - 4, 12)), FONT, 0.4, ORANGE if is_used else YELLOW, 1, cv2.LINE_AA)
+        color = ORANGE if is_used else (YELLOW if d.source == "yolo" else CYAN)
+        cv2.rectangle(tile, (x1, y1), (x2, y2), color, 3 if is_used else 1)
+        text = f"{d.conf:.2f}" if d.source == "yolo" else f"flow +{d.age}"
+        cv2.putText(tile, text, (x1, max(y1 - 4, 12)), FONT, 0.4, color, 1, cv2.LINE_AA)
     for pt, color in ((gt_pt, GREEN), (pred_pt, RED)):
         if pt is None or np.isnan(pt).any():
             continue
@@ -106,9 +109,10 @@ def draw_info(frame, status, used_cams, err, errs):
     for i, (text, color) in enumerate(lines):
         cv2.putText(img, text, (x0, 40 + 42 * i), FONT, 0.8, color, 2, cv2.LINE_AA)
     legend = [(GREEN, "GT trajectory / GT point"), (RED, "Online 3D track (frames <= t only)"),
-              (YELLOW, "YOLO26 detection"), (ORANGE, "Detection used by tracker"), (CAM_BLUE, "Camera (* = off map)")]
+              (YELLOW, "YOLO26 detection"), (CYAN, "Optical-flow box (frames since YOLO)"),
+              (ORANGE, "Box used by tracker"), (CAM_BLUE, "Camera (* = off map)")]
     for i, (color, text) in enumerate(legend):
-        y = TILE_H + 50 + 40 * i
+        y = TILE_H + 40 + 36 * i
         cv2.rectangle(img, (20, y - 14), (44, y + 4), color, -1)
         cv2.putText(img, text, (56, y), FONT, 0.75, WHITE, 1, cv2.LINE_AA)
     return img
@@ -119,14 +123,15 @@ def main():
     ap.add_argument("data_dir")
     ap.add_argument("--detections", default="cache/detections.csv")
     ap.add_argument("--out", default="out/demo.mp4")
+    ap.add_argument("--flow", nargs="?", const="cache/flow_boxes.csv", help="показать и использовать рамки потока (вперёд)")
     ap.add_argument("--max-frames", type=int)
     args = ap.parse_args()
 
     cams = load_cameras(args.data_dir)
     gt_df = load_ground_truth(args.data_dir)
     gt = gt_df.interpolate().values if gt_df is not None else None
-    dets = detections_by_frame(args.detections, cams)
-    tracker = OnlineTracker3D(cams, TrackerConfig.load(CONFIG_FILE))
+    dets = detections_by_frame(args.detections, cams, args.flow)
+    tracker = OnlineTracker3D(cams, load_config())
     caps = [cv2.VideoCapture(str(video_path(args.data_dir, c.name))) for c in cams]
 
     view = MapView(gt if gt is not None else np.array([[-200, -200, 0], [200, 200, 0]]))
@@ -139,7 +144,7 @@ def main():
     frames = cams[0].table.index[: args.max_frames]
     for t, frame in enumerate(frames):
         imgs = [cap.read()[1] for cap in caps]
-        frame_dets = dets.get(frame, [])
+        frame_dets = [d for d in dets.get(frame, []) if d.known_at <= frame]  # без обратного прохода: онлайн
         point, status = tracker.step(frame, frame_dets)
         tr = tracker.track
         used = tr.used_detections if tr is not None else []
