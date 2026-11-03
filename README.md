@@ -8,7 +8,7 @@
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-.venv/Scripts/python -m pip install ultralytics scipy pandas opencv-python matplotlib
+.venv/Scripts/python -m pip install ultralytics scipy pandas opencv-python matplotlib imageio-ffmpeg
 ```
 
 Данные кладём в `data/<набор>/` (видео `*.mp4` + `object_transform_*.csv`), папка в `.gitignore`.
@@ -17,8 +17,9 @@ python -m venv .venv
 
 ```bash
 python -m tracker.detect data/test                 # детекции YOLO26 -> cache/detections.csv
-python run.py data/test --calibrate                # трекинг + подбор сдвига до точки-ответа по GT
+python run.py data/test --calibrate                # трекинг + подбор высоты объекта и сдвига по GT
 python evaluate.py data/test out/trajectory.csv --plot out/eval.png
+python -m tools.demo_video data/test --out out/demo.mp4  # демо: карта + 5 камер с рамками
 ```
 
 На проверочном наборе (без GT):
@@ -41,8 +42,9 @@ python run.py data/test --detections cache/fake_detections.csv --out out/fake.cs
 |---|---|
 | `tracker/camera.py` | чтение CSV из UE, модель камеры, проекция точки, луч из пикселя |
 | `tracker/detect.py` | YOLO на каждом кадре каждой камеры (кадры независимы → онлайн) |
-| `tracker/online.py` | 3D-трек: EKF по пикселям всех камер, гейтинг, инициализация по паре камер |
+| `tracker/online.py` | 3D-трек: EKF по низу и высоте рамок всех камер, гейтинг, старт по паре камер или по одной |
 | `run.py` | цикл по кадрам строго вперёд, запись `Frame;Loc_X;Loc_Y;Loc_Z` (см) |
 | `evaluate.py` | ошибка в метрах vs GT |
+| `tools/demo_video.py` | демо-видео: вид сверху (GT / трек) + 5 камер с рамками YOLO и выбранными трекером |
 
 Ограничение: на кадре t используются только кадры ≤ t.

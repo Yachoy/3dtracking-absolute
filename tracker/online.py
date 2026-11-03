@@ -120,6 +120,7 @@ class Track:
     heading: float = 0.0
     confirmed: bool = False
     used_cameras: list = field(default_factory=list)
+    used_detections: list = field(default_factory=list)  # рамки, по которым обновился трек на этом кадре
 
     @classmethod
     def start(cls, pos, pos_var=4.0):
@@ -183,16 +184,17 @@ class OnlineTracker3D:
     def _update(self, poses, detections):
         t = self.track
         gate = CHI2_GATE[3 if self.cfg.use_size else 2]
-        t.used_cameras = []
+        t.used_cameras, t.used_detections = [], []
         for cam_idx, pose in enumerate(poses):
             best = None
             for det in (d for d in detections if d.camera == cam_idx):
                 inn = t.innovation(pose, det, self.cfg)
-                if inn is not None and inn[3] < gate and (best is None or inn[3] < best[3]):
-                    best = inn
+                if inn is not None and inn[3] < gate and (best is None or inn[3] < best[0][3]):
+                    best = (inn, det)
             if best is not None:
-                t.update(*best[:3])
+                t.update(*best[0][:3])
                 t.used_cameras.append(cam_idx)
+                t.used_detections.append(best[1])
         if t.used_cameras:
             t.updates += 1
             t.misses = 0
