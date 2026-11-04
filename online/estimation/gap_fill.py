@@ -8,15 +8,15 @@ GapFill работает только с ВЫХОДОМ: состояние тр
 
 1. Прогноз от последнего ответа. Скорость — наклон траектории за последнюю секунду надёжных кадров
    трекера (а не сглаженная скорость трекера, которая в прогнозе затухает), высота — уровень дороги
-   по многокамерным засечкам.
+   по засечкам двумя и более камерами.
 2. Поправка по наблюдениям. Кандидаты: 2D-маски SAM2, которые трекер сопровождает после пропуска
    YOLO (`tracked_2d`), маски, найденные трекером, но отброшенные (ему для захвата нужны две
    камеры), и YOLO с порогом 0,05 в окне вокруг проекции прогноза — дым и пыль на белой фуре роняют
    уверенность до 0,05–0,15 (Way2, кадр 816, камера 4).
    * две камеры с согласованными лучами — триангуляция центра;
-   * одна камера — направление на фуру надёжно, дальность по размеру маски нет. Поэтому берём
-     точку луча на высоте дороги (если луч смотрит вниз достаточно круто) или ближайшую к прогнозу
-     точку луча: поправляется только поперечная к лучу составляющая.
+   * одна камера — направление на фуру надёжно, дальность нет: берём ближайшую к прогнозу точку
+     луча, то есть правим только поперечную к лучу составляющую. Скорость прогноза на таких
+     поправках не учится.
    Кандидат принимается, если силуэт CAD в новой позе совпадает с маской.
 3. Плавность. Ответ тянется к измерению частично и не сдвигается за кадр дальше, чем позволяет
    скорость машины (`step_limit`): никаких рывков на десятки метров внутри провала.
@@ -32,18 +32,18 @@ from itertools import combinations
 import numpy as np
 
 from online.geometry import Observation, View, center_of, with_center
-from online.tracker import Estimate
+from online.tracker import Estimate, box_overlap
 
 FILLED = ("predicted", "weak", "guess")
-DECAY = 0.998            # затухание скорости за кадр в прогнозе (полжизни ~11 с на 30 кадр/с)
+DECAY = 0.99             # затухание скорости за кадр в прогнозе (полжизни ~2,3 с на 30 кадр/с)
 HISTORY_S = 1.0          # окно для скорости по надёжным кадрам трекера
 WEAK_CONF = 0.05
 MATCH_OVERLAP = 0.35     # силуэт CAD против маски для поправки
+NEAR_PROJECTION = 0.30   # слабая детекция / отброшенная маска: IoU с проекцией прогноза
 GUESS_SCORE = 0.45
 GUESS_OVERLAP = 0.55
 PULL_SINGLE = 0.35       # доля поправки к измерению одной камеры за кадр
 PULL_PAIR = 0.6          # и к триангуляции двумя камерами
-STEEP_RAY = 0.08         # луч круче этого (вниз) пересекаем с плоскостью дороги
 BELOW_CAMERAS_M = 25.0
 SCENE_REACH = 1.2
 SCENE_MARGIN_M = 50.0
@@ -107,7 +107,7 @@ class GapFill:
     def remember(self, frame, pose, status):
         if status in RELIABLE:
             self.history.append((frame, center_of(pose, self.model)))
-            if status in ("multi", "mask_multi"):
+            if status == "multi":
                 self.altitude = pose[2] if self.altitude is None else 0.8 * self.altitude + 0.2 * pose[2]
             if len(self.history) >= 4:
                 frames = np.array([f for f, _ in self.history], float)
@@ -121,12 +121,18 @@ class GapFill:
     def candidates(self, images, predicted, tracked_2d):
         """Наблюдения по камерам: 2D-маски SAM2, маски трекера и слабые детекции около прогноза."""
         found = {}
+        near = {}  # проекция прогноза по камерам: слабые детекции и отброшенные маски должны быть рядом
+        for key, view in self.tracker.current_views.items():
+            box = view.box(predicted) if predicted is not None else None
+            if box is not None:
+                near[key] = box
         for key, instance in (tracked_2d or {}).items():
             view = self.tracker.current_views.get(key)
             if view is not None:
                 found.setdefault(key, []).append(Observation(View.of(view.camera, instance, self.model)))
         for key, group in (getattr(self.tracker, "groups", None) or {}).items():
-            found.setdefault(key, []).extend(ob for ob in group if not ob.view.instance.flow)
+            found.setdefault(key, []).extend(ob for ob in group if not ob.view.instance.flow
+                                             and key in near and box_overlap(ob.box, near[key]) >= NEAR_PROJECTION)
         windows = []
         for key, view in self.tracker.current_views.items():
             box = view.box(predicted) if predicted is not None else None
@@ -144,21 +150,19 @@ class GapFill:
             for key, instances in segmenter.detect(windows, 640, WEAK_CONF).items():
                 view = self.tracker.current_views[key]
                 found.setdefault(key, []).extend(Observation(View.of(view.camera, item, self.model))
-                                                 for item in instances)
+                                                 for item in instances
+                                                 if key in near and box_overlap(item.box, near[key]) >= NEAR_PROJECTION)
         labels = self.model.labels
         return {key: [ob for ob in obs if not labels or ob.view.instance.label < 0 or ob.view.instance.label in labels]
                 for key, obs in found.items()}
 
     def single_point(self, observation, center):
-        """Точка на луче наблюдения: на высоте дороги или ближайшая к прогнозу."""
+        """Ближайшая к прогнозу точка луча: правится только поперечная к лучу составляющая.
+
+        Дальность по одной камере не берём: ни по размеру маски (пыль прячет часть фуры), ни по
+        пересечению луча с дорогой (рельеф и неточная высота — Way2, кадры 853–901: ответ уехал
+        по лучу камеры 4 назад на 40 м, а потом прогноз выучил эту ложную скорость)."""
         origin, ray = observation.view.ray(observation.center)
-        road = self.road_center_z(self.pose) if self.pose is not None else None
-        if road is not None and ray[2] < -STEEP_RAY:
-            depth = (road - origin[2]) / ray[2]
-            if depth > 2:
-                point = origin + ray * depth
-                if np.linalg.norm(point - center) <= 3 * self.step_limit() + 0.3 * self.model.size:
-                    return point
         return closest_point(origin, ray, center)
 
     def measure(self, images, predicted, tracked_2d):
@@ -240,12 +244,13 @@ class GapFill:
         else:
             point, pull, keys, ob, quality = measured
             target = center_of(predicted, self.model) + pull * (point - center_of(predicted, self.model))
-            change = target - center_of(self.pose, self.model)
-            self.velocity += 0.15 * (change - self.velocity)
-            if self.model.ground_vehicle:
-                self.velocity[2] = 0.0
-            limit = self.model.speed / self.fps
-            self.velocity *= min(1.0, limit / max(np.linalg.norm(self.velocity), 1e-9))
+            if len(keys) > 1:  # скорость учим только на триангуляции: одна камера даёт лишь направление
+                change = target - center_of(self.pose, self.model)
+                self.velocity += 0.10 * (change - self.velocity)
+                if self.model.ground_vehicle:
+                    self.velocity[2] = 0.0
+                limit = self.model.speed / self.fps
+                self.velocity *= min(1.0, limit / max(np.linalg.norm(self.velocity), 1e-9))
             status, views = "weak", {key: ob.view.instance for key in keys[:1]}
         self.pose = self.move_to(target, predicted)
         self.filled += 1

@@ -32,7 +32,7 @@ def test_gap_continues_recent_motion_on_the_road():
     assert all(e.status == "predicted" and e.pose is not None for e in out)
     assert np.isclose(out[-1].pose[2], 3.0, atol=1e-6)            # высота дороги
     moved = center_of(out[-1].pose, DEFAULT_TARGET) - start
-    assert 8.0 < moved[0] < 9.0 and abs(moved[1]) < 1e-6           # 30 кадров × ~0,3 м
+    assert 7.0 < moved[0] < 8.5 and abs(moved[1]) < 1e-6           # 30 кадров × 0,3 м с затуханием
     steps = [np.linalg.norm(center_of(b.pose, DEFAULT_TARGET) - center_of(a.pose, DEFAULT_TARGET))
              for a, b in zip(out, out[1:])]
     assert max(steps) < 0.31
