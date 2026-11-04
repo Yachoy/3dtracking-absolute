@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import block_diag, diags, identity, kron
+from scipy.sparse import block_diag, coo_matrix, diags, identity, kron
 from scipy.sparse.linalg import spsolve
 
 
@@ -76,7 +76,7 @@ def solve_window(p, W, lam, irls=2, cauchy_c=3.0):
     w = np.ones(n)
     for _ in range(irls + 1):
         Wr = W * w[:, None, None]
-        H = (block_diag(list(Wr)) + S).tocsc()
+        H = (block_diag([coo_matrix(Wr[0])] + list(Wr[1:])) + S).tocsc()
         x = spsolve(H, np.einsum("nij,nj->ni", Wr, p).ravel()).reshape(n, 3)
         d = x - p
         res = np.sqrt(np.maximum(np.einsum("ni,nij,nj->n", d, W, d), 0))
