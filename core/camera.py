@@ -37,7 +37,7 @@ class Camera:
             index=track.index,
             loc=pose.loc.copy(),
             rot=pose.rot.copy(),
-            focal_mm=track.focal_mm,
+            focal_mm=pose.focal_mm if pose.focal_mm is not None else track.focal_mm,  # зум по кадрам (Way2)
             sensor_mm=track.sensor_mm,
             width=width,
             height=height,

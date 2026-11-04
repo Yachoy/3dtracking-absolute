@@ -56,7 +56,7 @@ def camera_manifest(path):
         if type(key) is not int or key < 1 or key in cameras:
             raise ValueError("Each camera needs a unique positive integer id")
         poses, meta = read_transform_csv(path.parent / entry["poses"])
-        poses = {f: Pose(f, p.loc * (scale / 0.01), p.rot) for f, p in poses.items()
+        poses = {f: Pose(f, p.loc * (scale / 0.01), p.rot, p.focal_mm) for f, p in poses.items()
                  if np.isfinite(np.r_[p.loc, p.rot]).all()}
         intrinsics = entry.get("intrinsics_px")
         focal = entry.get("focal_mm", meta["focal_mm"])
