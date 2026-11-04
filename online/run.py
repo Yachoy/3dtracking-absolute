@@ -22,6 +22,7 @@ from online.estimation.speed import SpeedMeter
 from online import smooth
 from online.target import load_target
 from online.tracker import Tracker
+from online.estimation.gap_fill import FILLED
 from online.perception.vision import PromptSegmenter, Segmenter
 
 
@@ -206,6 +207,11 @@ def run(args):
         tracker = Tracker(segmenter, fps, args.cadence, prompt, model, seed_boxes,
                           robust=args.robust, adaptive=args.adaptive, video_masks=video_masks)
         tracker.camera_ids.update(tracks)
+    gap_fill = None
+    if args.global_seg is not None and not args.no_fill_gaps:
+        from online.estimation.gap_fill import GapFill
+
+        gap_fill = GapFill(tracker, model, fps)
     mono_depth = MonoDepth(model, fps) if args.mono_depth else None
     flow_jump_guard = FlowJumpGuard(model, fps) if args.guard_flow_jumps else None
     cab_ray = None
@@ -266,6 +272,8 @@ def run(args):
                     missing[key] = missing.get(key, 0) + 1
             start = time.perf_counter()
             estimate = tracker.step(frame, cameras, images)
+            if gap_fill is not None:
+                estimate = gap_fill.step(frame, estimate, images)  # только выход: состояние трекера не меняется
             if (any(refinement is not None for refinement in (refiner, mono_depth, surface_pose, flow_jump_guard, pipeline))
                     and estimate.pose is not None):
                 views = [view if tracker.frame_guard else View.of(view.camera, tracker.memory[key].mask, model)
@@ -329,7 +337,7 @@ def run(args):
             processing.append(time.perf_counter() - start)
             xyz = [round(float(x) * 100, 4) for x in estimate.pose[:3]] if estimate.pose is not None else [None] * 3
             center = (center_of(estimate.pose, model)
-                      if estimate.pose is not None and estimate.status not in {"forecast", "flow", "mask_multi"} else None)
+                      if estimate.pose is not None and estimate.status not in {"forecast", "flow", "mask_multi", *FILLED} else None)
             speed = speed_meter.step(frame, center)
             speed_mps = round(speed, 4) if speed is not None else None
             speed_kmh = round(speed * 3.6, 3) if speed is not None else None
@@ -430,6 +438,8 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--model", type=Path, default=Path("models/yolo26n-seg.onnx"))
     parser.add_argument("--global-seg", type=Path, help="Use global segmentation and cross-camera CAD consensus")
+    parser.add_argument("--no-fill-gaps", action="store_true",
+                        help="With --global-seg: leave frames without a tracker pose empty instead of predicting them")
     parser.add_argument("--sam", type=Path, help="Optional SAM 2 ONNX filename prefix")
     parser.add_argument("--target", type=Path, help="Metric CAD target JSON (default: Way1 CargoTruck)")
     parser.add_argument("--seed-box", type=seed_box, action="append", default=[],

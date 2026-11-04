@@ -322,6 +322,7 @@ class ConsensusTracker:
         if prior is not None:
             prior[:3] += self.velocity
         groups = self.observations(cameras, images, prior)
+        self.groups = groups  # для заполнения провалов (online/estimation/gap_fill.py)
         matched = self.support(prior, groups, 0.3) if prior is not None else []
         pose, accepted = None, []
         if matched:

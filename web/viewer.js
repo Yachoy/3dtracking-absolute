@@ -13,7 +13,7 @@ const integer = new Intl.NumberFormat("ru-RU");
 const green = "#86f0b4";
 const orange = "#ff8f53";
 const muted = "#a5b3c2";
-const names = {multi: "Триангуляция", mask_multi: "3D по сопровождению масок", mono: "Одна камера", motion: "Движение и рёбра", flow: "Оптический поток", forecast: "Прогноз", lost: "Потеря"};
+const names = {multi: "Триангуляция", mask_multi: "3D по сопровождению масок", mono: "Одна камера", motion: "Движение и рёбра", flow: "Оптический поток", forecast: "Прогноз", predicted: "Прогноз без наблюдений", weak: "Слабое наблюдение (одна камера)", guess: "Первая оценка (одна камера)", lost: "Потеря"};
 const pad = {left: 51, right: 16, top: 13, bottom: 23};
 let data;
 let frames;
