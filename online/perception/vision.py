@@ -32,8 +32,9 @@ class Segmenter:
         options.intra_op_num_threads = threads
         options.log_severity_level = 3
         providers = ["CPUExecutionProvider"]
-        if "CUDAExecutionProvider" in ort.get_available_providers():
-            providers.insert(0, "CUDAExecutionProvider")
+        for gpu in ("DmlExecutionProvider", "CUDAExecutionProvider"):  # DirectML — любая видеокарта на Windows
+            if gpu in ort.get_available_providers():
+                providers.insert(0, gpu)
         self.model = ort.InferenceSession(str(path), options, providers=providers)
         ort.disable_telemetry_events()
         self.input = self.model.get_inputs()[0].name

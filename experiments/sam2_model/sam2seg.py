@@ -6,7 +6,7 @@ class SAM2:
     def __init__(s, threads=2, model_path=None):
         so = ort.SessionOptions(); so.intra_op_num_threads = threads; so.log_severity_level = 3
         prefix = str(model_path) if model_path is not None else M
-        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if 'CUDAExecutionProvider' in ort.get_available_providers() else ['CPUExecutionProvider']
+        providers = [p for p in ('CUDAExecutionProvider', 'DmlExecutionProvider', 'CPUExecutionProvider') if p in ort.get_available_providers()]
         s.enc = ort.InferenceSession(prefix + '.encoder.onnx', so, providers=providers)
         s.dec = ort.InferenceSession(prefix + '.decoder.onnx', so, providers=providers)
     def encode(s, crop):

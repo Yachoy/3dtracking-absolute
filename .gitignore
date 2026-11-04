@@ -10,3 +10,5 @@ runtime/
 .cache/
 .venv-*/
 configs/*.local.json
+cache/
+yolo26s.pt
