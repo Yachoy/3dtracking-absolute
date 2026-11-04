@@ -160,6 +160,9 @@ def run(args):
     if not protected and len(aligned) != len(caps):
         raise ValueError("Camera frame rates differ")
     counts = [int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) for cap in aligned.values()]
+    if args.pico_source is not None or modern:
+        # Windows: cuDNN из PyTorch загружается раньше пакета nvidia-cudnn для ONNX Runtime, иначе DLL конфликтуют
+        import torch  # noqa: F401
     segmenter = Segmenter(args.model, args.threads, labels=model.labels,
                           exclude=(0,) if model.ground_vehicle else ())
     prompt = PromptSegmenter(args.sam, args.threads) if args.sam is not None else None

@@ -47,3 +47,20 @@
 2. Маски чище: SAM на каждом кадре, модель SAM крупнее (small), обрезка тени.
 3. Для одной камеры — высота дороги (у R1venDev `online/estimation/road_height.py`).
 4. Уточнить у организаторов, разрешена ли задержка выдачи (называть «задержка k кадров», не «будущее»).
+
+## Прогоны на ПК с GPU (1080 Ti, Windows, 4 ноября)
+
+Окружение: Python 3.12, `onnxruntime-gpu[cuda,cudnn]==1.22.0` + `nvidia-cudnn-cu12==9.8.0.87`
+(cuDNN 9.27 падает на Pascal и молча уходит на CPU), `torch` 2.14 cu126 (cu128 не поддерживает sm_61),
+`einops omegaconf mmcv-lite timm`. PicoPose — `vendor/PicoPose` (коммит 543f8fe), чекпойнт `vendor/picopose.ckpt`.
+Полная сетка для `--appearance-target`: `python tools/truck_mesh.py CargoTruck.fbx models/truck`
+(без Assimp, в системе оболочек `truck_hulls.json`, ×3.1).
+
+| Прогон | MAE онлайн | Медиана | Макс | lagsmooth 30 + 0.85 |
+|---|---|---|---|---|
+| без PicoPose, `--cadence 1 --mono-depth --guard-flow-jumps` | 3.78 | 2.43 | 21.2 | 3.00 |
+| **PicoPose, `--mono-depth --recover-second-view`** | **3.01** | 1.99 | 16.0 | **2.00** |
+| PicoPose + `--cadence 1 --guard-flow-jumps` | 3.57 | 2.30 | 21.2 | 2.85 |
+
+Без PicoPose GPU даёт те же 3.78 м, что CPU. С PicoPose ~10 мин на 1001 кадр. `recovered_camera` не принят
+ни разу (у R1venDev — кадр 512): вероятная причина разрыва с 2.53 м — их сетка/версии.
