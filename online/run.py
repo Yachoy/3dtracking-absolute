@@ -183,7 +183,7 @@ def run(args):
     if args.cab_ray is not None:
         from online.estimation.cab_ray import CabRay
 
-        cab_ray = CabRay(args.cab_ray, model)
+        cab_ray = CabRay(args.cab_ray, model, until_multi=not args.cab_ray_always)
     surface_pose = None
     if args.surface_pose:
         from online.estimation.surface_pose import SurfacePose
@@ -391,6 +391,8 @@ def main():
     parser.add_argument("--surface-pose", action="store_true", help="Refine pose from causal tracks attached to the CAD surface")
     parser.add_argument("--guard-flow-jumps", action="store_true", help="Reject implausible jumps without fresh detections")
     parser.add_argument("--cab-ray", type=Path, help="YOLO weights (e.g. yolo26l.pt): ray to the cab from cameras without a mask")
+    parser.add_argument("--cab-ray-always", action="store_true",
+                        help="keep the cab ray after the first multi-camera fix (default: only before it)")
     parser.add_argument("--renderer", choices=("numpy", "pytorch3d"), default="numpy", help="Visible CAD rasterizer for GoTrack")
     parser.add_argument("--gotrack-source", type=Path, help="Official GoTrack source checkout")
     parser.add_argument("--gotrack-checkpoint", type=Path, help="Official GoTrack checkpoint")

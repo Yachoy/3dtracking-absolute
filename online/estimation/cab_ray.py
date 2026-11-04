@@ -10,6 +10,11 @@
 3. поза поправляется взвешенным МНК: старая оценка точна поперёк луча своей камеры и неточна
    вдоль (дальность), новая камера даёт луч на центр кабины с точностью в несколько пикселей.
 Используются только текущий кадр и состояние трекера — режим остаётся причинным.
+
+По умолчанию луч работает только до первой многокамерной засечки: пока дальность известна лишь по
+одной камере, луч — единственный второй ракурс (Way1, кадры 0–21: 5.32 → 0.81 м). Позже дальность держит
+модель движения, а дальние кабины на камерах 3–4 YOLO путает: поправки 7–11 м с подъёмом на 2 м
+(Way1, кадры 645–684 и 781–798) портят ответ, в сумме MAE 3.78 → 4.02 м при работе на всём ролике.
 """
 import numpy as np
 
@@ -20,7 +25,7 @@ EDGE_PX = 3
 
 
 class CabRay:
-    def __init__(self, weights, model, conf=0.08, imgsz=640, max_shift_m=12.0, sigma_px=4.0):
+    def __init__(self, weights, model, conf=0.08, imgsz=640, max_shift_m=12.0, sigma_px=4.0, until_multi=True):
         from ultralytics import YOLO
 
         self.detector = YOLO(str(weights))
@@ -31,6 +36,8 @@ class CabRay:
         self.conf, self.imgsz = conf, imgsz
         self.max_shift_m, self.sigma_px = max_shift_m, sigma_px
         self.applied = None  # (камера, сдвиг, м) на последнем кадре — для replay.json
+        self.until_multi = until_multi
+        self.seen_multi = False  # была ли уже засечка двумя и более камерами
 
     def detect(self, image, view, pose):
         """Центр кабины в кадре камеры или None."""
@@ -73,6 +80,10 @@ class CabRay:
     def step(self, pose, status, used, cameras, images):
         """Поправленная поза (или та же). used — камеры, давшие наблюдение на этом кадре."""
         self.applied = None
+        if len(used) > 1:
+            self.seen_multi = True
+        if self.until_multi and self.seen_multi:
+            return pose
         if pose is None or status not in {"mono", "forecast", "motion", "flow"} or len(used) > 1:
             return pose
         R = Rot(*pose[3:])

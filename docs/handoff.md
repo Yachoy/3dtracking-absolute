@@ -64,3 +64,22 @@
 
 Без PicoPose GPU даёт те же 3.78 м, что CPU. С PicoPose ~10 мин на 1001 кадр. `recovered_camera` не принят
 ни разу (у R1venDev — кадр 512): вероятная причина разрыва с 2.53 м — их сетка/версии.
+
+### Луч на кабину (`--cab-ray`)
+
+Лучшая конфигурация — PicoPose + луч на кабину (веса `models/yolo26l-seg.pt`, ultralytics ставить с `--no-deps`:
+иначе он тянет CPU-шный `onnxruntime`, тот перекрывает `onnxruntime-gpu`, и YOLO/SAM молча идут на CPU):
+
+`python -m online.run --data data/test --out out/pico-cab0 --sam models/sam2/sam2.1_hiera_tiny --threads 6 --mono-depth --recover-second-view --pico-source vendor/PicoPose --pico-checkpoint vendor/picopose.ckpt --appearance-target models/truck/target.json --cab-ray models/yolo26l-seg.pt`
+
+Луч работает только до первой многокамерной засечки (Way1 — кадр 22). На всём ролике (`--cab-ray-always`)
+дальние кабины на камерах 3–4 YOLO путает: поправки 7–11 м с подъёмом на ~2 м, MAE хуже базы.
+
+| Прогон | MAE онлайн | Медиана | Макс | 0–21 | 0–134 | lagsmooth 30 + 0.85 |
+|---|---|---|---|---|---|---|
+| **PicoPose + луч до засечки** | **2.92** | 1.89 | 16.0 | 0.82 | 1.48 | **1.95** |
+| PicoPose + луч всегда | 3.30 | 2.06 | 16.4 | 0.82 | — | 2.12 |
+| без PicoPose + луч до засечки | 3.68 | 2.31 | 21.2 | 0.81 | 1.61 | 2.96 |
+| без PicoPose + луч всегда | 4.02 | 2.42 | 21.2 | 0.81 | — | 3.16 |
+
+Луч до засечки срабатывает на 22 кадрах (0–21), все стали лучше; остальные кадры совпадают с прогоном без луча.
