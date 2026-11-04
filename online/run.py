@@ -160,7 +160,7 @@ def run(args):
     if not protected and len(aligned) != len(caps):
         raise ValueError("Camera frame rates differ")
     counts = [int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) for cap in aligned.values()]
-    if args.pico_source is not None or modern:
+    if args.pico_source is not None or modern or args.cab_ray is not None:
         # Windows: cuDNN из PyTorch загружается раньше пакета nvidia-cudnn для ONNX Runtime, иначе DLL конфликтуют
         import torch  # noqa: F401
     segmenter = Segmenter(args.model, args.threads, labels=model.labels,
@@ -179,6 +179,11 @@ def run(args):
     tracker.camera_ids.update(tracks)
     mono_depth = MonoDepth(model, fps) if args.mono_depth else None
     flow_jump_guard = FlowJumpGuard(model, fps) if args.guard_flow_jumps else None
+    cab_ray = None
+    if args.cab_ray is not None:
+        from online.estimation.cab_ray import CabRay
+
+        cab_ray = CabRay(args.cab_ray, model)
     surface_pose = None
     if args.surface_pose:
         from online.estimation.surface_pose import SurfacePose
@@ -261,6 +266,11 @@ def run(args):
                 checked = flow_jump_guard.step(estimate.pose, estimate.status, estimate.confidence, estimate.views, views)
                 flow_jump_changed = checked is not estimate.pose
                 estimate.pose = checked
+            if cab_ray is not None and estimate.pose is not None:
+                corrected = cab_ray.step(estimate.pose, estimate.status, estimate.views, cameras, images)
+                # поправляем только ответ: если сдвигать и состояние трекера, выходной фильтр потом
+                # долго сходится к многокамерной оценке (Way1, кадры 0–134: 1.61 м против 1.77–2.02 м)
+                estimate.pose = corrected
             if args.recover_second_view:
                 previous = previous_recovery_baseline
                 previous_recovery_baseline = estimate.pose
@@ -298,6 +308,8 @@ def run(args):
                 record["joint_applied"] = refiner.joint_applied
             if mono_depth is not None:
                 record["mono_depth_applied"] = mono_changed
+            if cab_ray is not None and cab_ray.applied is not None:
+                record["cab_ray"] = {"cams": cab_ray.applied[0], "shift_m": round(cab_ray.applied[1], 2)}
             if surface_pose is not None:
                 record["surface_cams"] = list(surface_cameras)
             if flow_jump_guard is not None:
@@ -378,6 +390,7 @@ def main():
     parser.add_argument("--mono-depth", action="store_true", help="Carry verified depth through short single-camera intervals")
     parser.add_argument("--surface-pose", action="store_true", help="Refine pose from causal tracks attached to the CAD surface")
     parser.add_argument("--guard-flow-jumps", action="store_true", help="Reject implausible jumps without fresh detections")
+    parser.add_argument("--cab-ray", type=Path, help="YOLO weights (e.g. yolo26l.pt): ray to the cab from cameras without a mask")
     parser.add_argument("--renderer", choices=("numpy", "pytorch3d"), default="numpy", help="Visible CAD rasterizer for GoTrack")
     parser.add_argument("--gotrack-source", type=Path, help="Official GoTrack source checkout")
     parser.add_argument("--gotrack-checkpoint", type=Path, help="Official GoTrack checkpoint")
