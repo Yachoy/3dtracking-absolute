@@ -1,6 +1,12 @@
-# данные не версионируются (архив лежит вне репозитория)
 data/
-out/
-.venv/
 __pycache__/
 *.pyc
+*.pt
+.idea/
+.vscode/
+
+# результаты прогона: csv, графики и метрики — в репозитории,
+# видео пересобирается валидатором (python validate.py --run out/yolo-like)
+out/*
+!out/yolo-like/
+out/yolo-like/*.mp4

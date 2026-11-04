@@ -1,2 +1,4 @@
 numpy>=2.0
-opencv-python-headless>=4.10
+opencv-python>=4.10
+ultralytics>=8.4
+tqdm>=4.66
