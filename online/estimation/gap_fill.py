@@ -77,6 +77,22 @@ TURN_SPEED = 3.0         # м/с — ниже этой скорости курс
 EDGE_PX = 4
 
 
+def scene_plausible(pose, views, model):
+    """Наземная цель внутри зоны, которую снимают камеры, и не глубоко под ними.
+
+    Way2, кадр 6: огонь в камере 1 по размеру маски дал ~1 км (761 м от центра расстановки при её
+    радиусе 468 м) и 44 м ниже камер."""
+    if not model.ground_vehicle or len(views) < 3:
+        return True
+    locs = np.array([view.camera.loc for view in views.values()]) / 100
+    center = center_of(pose, model)
+    middle = locs[:, :2].mean(axis=0)
+    radius = np.linalg.norm(locs[:, :2] - middle, axis=1).max()
+    if np.linalg.norm(center[:2] - middle) > SCENE_REACH * radius + SCENE_MARGIN_M:
+        return False
+    return center[2] >= locs[:, 2].min() - BELOW_CAMERAS_M
+
+
 def triangulate_pair(a, b):
     """Середина общего перпендикуляра двух лучей и расстояние между ними."""
     (oa, ra), (ob, rb) = a, b
@@ -115,16 +131,7 @@ class GapFill:
         return max(1.5, 2 * self.model.speed / self.fps)
 
     def inside_scene(self, pose):
-        views = self.tracker.current_views
-        if not self.model.ground_vehicle or len(views) < 3:
-            return True
-        locs = np.array([view.camera.loc for view in views.values()]) / 100
-        center = center_of(pose, self.model)
-        middle = locs[:, :2].mean(axis=0)
-        radius = np.linalg.norm(locs[:, :2] - middle, axis=1).max()
-        if np.linalg.norm(center[:2] - middle) > SCENE_REACH * radius + SCENE_MARGIN_M:
-            return False
-        return center[2] >= locs[:, 2].min() - BELOW_CAMERAS_M
+        return scene_plausible(pose, self.tracker.current_views, self.model)
 
     def pose_at(self, xy):
         """Поза из точки ответа на дороге и текущего курса."""

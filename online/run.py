@@ -202,7 +202,8 @@ def run(args):
         from online.estimation.consensus import ConsensusTracker, GlobalSegmenter
 
         tracker = ConsensusTracker(GlobalSegmenter(args.global_seg, model.labels), model, fps, len(tracks),
-                                   video_masks=video_masks)
+                                   video_masks=video_masks, acquire_clipped=args.acquire_clipped,
+                                   single_camera=args.single_camera)
     else:
         tracker = Tracker(segmenter, fps, args.cadence, prompt, model, seed_boxes,
                           robust=args.robust, adaptive=args.adaptive, video_masks=video_masks)
@@ -438,6 +439,10 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--model", type=Path, default=Path("models/yolo26n-seg.onnx"))
     parser.add_argument("--global-seg", type=Path, help="Use global segmentation and cross-camera CAD consensus")
+    parser.add_argument("--acquire-clipped", action="store_true",
+                        help="With --global-seg: allow acquisition from a camera pair where one mask touches the frame edge")
+    parser.add_argument("--single-camera", action="store_true",
+                        help="With --global-seg: allow acquisition from one camera when a confident detection persists")
     parser.add_argument("--no-fill-gaps", action="store_true",
                         help="With --global-seg: leave frames without a tracker pose empty instead of predicting them")
     parser.add_argument("--sam", type=Path, help="Optional SAM 2 ONNX filename prefix")
@@ -480,6 +485,8 @@ def main():
     parser.add_argument("--method", choices=smooth.METHODS, default="linear", help="Trajectory smoothing method")
     parser.add_argument("--video", action="store_true")
     args = parser.parse_args()
+    if (args.acquire_clipped or args.single_camera) and args.global_seg is None:
+        parser.error("--acquire-clipped and --single-camera need --global-seg")
     if args.global_seg is not None:
         legacy_options = (args.sam, args.seed_box, args.pico_source, args.pico_checkpoint, args.pico_subpixel,
                           args.appearance_target, args.joint_pose, args.joint_motion_check, args.joint_spatial_check,

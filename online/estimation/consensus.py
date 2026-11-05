@@ -98,8 +98,40 @@ def compatible_rays(first, second, size):
     return gap <= 0.30 * size
 
 
+class SingleCameraGate:
+    """Захват по одной камере — только если уверенная детекция держится несколько кадров подряд
+    в одной камере и движется не быстрее машины (одиночные ложные срабатывания не проходят)."""
+
+    def __init__(self, frames, speed, fps):
+        self.frames = frames
+        self.limit = speed / fps
+        self.key = None
+        self.history = []
+
+    def update(self, frame, key, center):
+        last = self.history[-1] if self.history else None
+        if (self.key != key or last is None or frame - last[0] > 2
+                or np.linalg.norm(center - last[1]) > self.limit * (frame - last[0]) + 1.5):
+            self.key, self.history = key, []
+        self.history = [*self.history, (frame, np.asarray(center, float))][-self.frames:]
+        return len(self.history) >= self.frames
+
+    def reset(self):
+        self.key, self.history = None, []
+
+
 class ConsensusTracker:
-    def __init__(self, segmenter, model, fps, camera_count, video_masks=None):
+    def __init__(self, segmenter, model, fps, camera_count, video_masks=None,
+                 acquire_clipped=False, single_camera=False):
+        # acquire_clipped: захват по паре камер, где одна маска обрезана краем кадра
+        #   (Way1, кадры 0-99: фуру уверенно видят камеры 1 и 2, но в камере 2 её режет нижний край);
+        # single_camera: захват по одной камере в многокамерной сцене
+        #   (Way1, кадры 232-312: фуру видит только камера 2, остальные закрыты горой и деревьями).
+        self.acquire_clipped = acquire_clipped
+        self.single_camera = single_camera
+        self.single_gate = SingleCameraGate(max(3, round(fps / 6)), model.speed, fps)
+        self.last_pose = None
+        self.last_pose_frame = -1
         self.segmenter = segmenter
         self.model = model
         self.fps = fps
@@ -235,8 +267,11 @@ class ConsensusTracker:
         for first, second in combinations(groups.values(), 2):
             for a in first:
                 for b in second:
-                    if (a.view.instance.flow or b.view.instance.flow or a.clipped or b.clipped
-                            or not compatible_rays(a, b, self.model.size)):
+                    if a.view.instance.flow or b.view.instance.flow:
+                        continue
+                    if (a.clipped and b.clipped) or ((a.clipped or b.clipped) and not self.acquire_clipped):
+                        continue
+                    if not compatible_rays(a, b, self.model.size):
                         continue
                     pose = self.fit_pose([a, b], None)
                     support = self.support(pose, groups, 0.55)
@@ -247,6 +282,23 @@ class ConsensusTracker:
                     if best is None or score > best[0]:
                         best = score, pose, fresh
         return (best[1], best[2]) if best else (None, [])
+
+    def single_camera_ok(self, observation, candidate):
+        """Захват по одной камере в многокамерной сцене: место правдоподобно, недалеко от последней
+        позы с наблюдением и держится несколько кадров подряд."""
+        from online.estimation.gap_fill import scene_plausible
+
+        if not scene_plausible(candidate, self.current_views, self.model):
+            self.single_gate.reset()
+            return False
+        center = center_of(candidate, self.model)
+        if self.last_pose is not None:
+            elapsed = (self.frame - self.last_pose_frame) / self.fps
+            reach = self.model.speed * elapsed + max(15.0, 0.6 * self.model.size)
+            if np.linalg.norm(center - center_of(self.last_pose, self.model)) > reach:
+                self.single_gate.reset()
+                return False
+        return self.single_gate.update(self.frame, observation.view.camera.index, center)
 
     def step(self, frame, cameras, images):
         estimate = self.estimate_pose(frame, cameras, images)
@@ -350,15 +402,17 @@ class ConsensusTracker:
                 pose, accepted = candidate, support
                 fresh = len(support)
 
-        if previous is None and pose is None and self.camera_count == 1:
+        if previous is None and pose is None and (self.camera_count == 1 or self.single_camera):
             strong = [ob for group in groups.values() for ob in group
                       if not ob.clipped and ob.view.instance.score >= 0.50 and min(ob.size) >= 18]
             if strong:
                 observation = max(strong, key=lambda ob: ob.view.instance.score)
                 candidate = self.fit_pose([observation], None)
                 overlap = observation.overlap(candidate)
-                if overlap >= 0.68:
+                if overlap >= 0.68 and (self.camera_count == 1 or self.single_camera_ok(observation, candidate)):
                     pose, accepted, fresh = candidate, [(observation, overlap)], 1
+            elif self.single_camera:
+                self.single_gate.reset()
 
         if fresh >= 2:
             self.last_multi = frame
@@ -374,6 +428,7 @@ class ConsensusTracker:
         if pose is not None:
             if fresh:
                 self.last_seen = frame
+                self.last_pose, self.last_pose_frame = pose.copy(), frame
             if reset or previous is None:
                 self.velocity.fill(0)
             else:
