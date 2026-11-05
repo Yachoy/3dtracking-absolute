@@ -41,8 +41,17 @@ FILLED = ("predicted", "weak", "guess")
 HISTORY_S = 1.0          # окно для начальной скорости по надёжным кадрам трекера
 ACCEL_SIGMA = 1.5        # м/с² — шум ускорения в прогнозе (повороты, разгон)
 BLIND_DECAY = 1.0        # затухание скорости вслепую: 1 — постоянная скорость (на Way2 лучше по сумме стыков 1042 и 1500)
-RESET_POS_SIGMA = 0.5    # м — неопределённость позы трекера на последнем кадре
+RESET_SIGMA = {          # м — неопределённость позы трекера по тому, как она получена
+    "multi": 0.5, "mask_multi": 1.0, "cad_points": 1.0, "cad_flow": 1.5, "cad_region": 1.5,
+    "mono": 2.5, "flow": 3.0, "motion": 3.0, "mask_large": 3.0,
+}
 RESET_VEL_SIGMA = 1.5    # м/с
+TAKE_OVER = ("forecast",)  # кадры трекера без наблюдений, которые заполнение берёт на себя
+                           # (Way1, 383–411: прогноз трекера уехал на 44 м, а маски видны в 3 камерах)
+INFLATE = 2.0            # во сколько раз растёт неопределённость, если все наблюдения кадра отброшены
+INFLATE_MAX_M = 60.0
+REACQUIRE_FRAMES = 3     # кадров подряд, когда две камеры согласны между собой, но не с фильтром
+REACQUIRE_SIGMA = 2.0
 GUESS_POS_SIGMA = 15.0
 GUESS_VEL_SIGMA = 6.0
 CENTER_PX = 6.0          # погрешность направления на центр рамки: max(6 px, 12 % ширины)
@@ -50,7 +59,9 @@ CENTER_REL = 0.12
 EDGE_REL = 0.15          # видимая сторона обрезанной рамки: 15 % ширины проекции
 HEIGHT_RATIO = 0.87      # высота рамки / высота проекции CAD (медиана по Way2)
 HEIGHT_REL = 0.30
-HEIGHT_MODE = "closer"   # "closer": высота рамки — только если она больше ожидаемой; "off" — не брать
+HEIGHT_MODE = "window"   # "window": высота рамки в обе стороны, если отношение к ожидаемой в HEIGHT_WINDOW;
+                         # "closer": только если рамка больше ожидаемой; "off" — не брать
+HEIGHT_WINDOW = (0.75, 1.5)  # рамка сильно ниже ожидаемой — скорее закрытие (дерево, пыль), чем дальность
 WEAK_SCALE = 1.5         # слабые детекции и отброшенные маски — погрешность в 1,5 раза больше
 GATE = {1: 8.8, 2: 11.6}  # χ² на 99,7 % — порог Махаланобиса
 WEAK_CONF = 0.05
@@ -95,6 +106,7 @@ class GapFill:
         self.answer_z = None         # высота точки ответа на дороге
         self.history = deque(maxlen=max(2, round(HISTORY_S * fps)))
         self.previous_boxes = {}     # рамки-кандидаты прошлого кадра по камерам
+        self.disagree = 0            # кадров подряд, когда две камеры согласны, а фильтр — нет
         self.gap = 0
         self.filled = 0
 
@@ -139,6 +151,7 @@ class GapFill:
         self.P = np.diag([pos_sigma ** 2] * 2 + [(vel_sigma / self.fps) ** 2] * 2)
 
     def remember(self, frame, pose, status):
+        """Кадр трекера с наблюдением: фильтр начинается заново от его позы."""
         point = np.asarray(pose[:3], float)
         if status in RELIABLE:
             self.history.append((frame, point))
@@ -151,7 +164,8 @@ class GapFill:
             velocity = np.polyfit(frames - frames[-1], centers, 1)[0]
             limit = self.model.speed / self.fps
             velocity *= min(1.0, limit / max(np.linalg.norm(velocity[:2]), 1e-9))
-        self.reset(pose, velocity, RESET_POS_SIGMA, RESET_VEL_SIGMA)
+        self.reset(pose, velocity, RESET_SIGMA.get(status, 2.0), RESET_VEL_SIGMA)
+        self.disagree = 0
 
     # ---------------------------------------------------------- measurements
     def candidates(self, images, predicted, tracked_2d):
@@ -265,7 +279,9 @@ class GapFill:
                 return False
             J[:, axis] = (plus[0] - minus[0]) / (2 * delta)
         residual = z - predicted
-        if len(z) == 2 and (HEIGHT_MODE == "off" or (HEIGHT_MODE == "closer" and residual[1] < 0)):
+        ratio = z[1] / max(predicted[1], 1e-6) if len(z) == 2 else 1.0
+        if len(z) == 2 and (HEIGHT_MODE == "off" or (HEIGHT_MODE == "closer" and residual[1] < 0)
+                            or (HEIGHT_MODE == "window" and not HEIGHT_WINDOW[0] <= ratio <= HEIGHT_WINDOW[1])):
             # рамка ниже ожидаемой — это может быть закрытие (дерево, пыль), а не дальность:
             # закрытие делает рамку только меньше, поэтому верим высоте, лишь когда фура «ближе»
             z, predicted, sigma, J, residual = z[:1], predicted[:1], sigma[:1], J[:1], residual[:1]
@@ -298,7 +314,7 @@ class GapFill:
 
     # --------------------------------------------------------------------- step
     def step(self, frame, estimate, images):
-        if estimate.pose is not None:
+        if estimate.pose is not None and (estimate.status not in TAKE_OVER or self.x is None):
             self.remember(frame, estimate.pose, estimate.status)
             self.pose = np.asarray(estimate.pose, float).copy()
             self.gap = 0
@@ -318,12 +334,17 @@ class GapFill:
         self.turn()
         predicted = self.pose_at(self.x[:2])
         used = {}
-        for key, ob, reliable in sorted(self.candidates(images, predicted, estimate.tracked_2d),
-                                        key=lambda item: not item[2]):
+        candidates = sorted(self.candidates(images, predicted, estimate.tracked_2d), key=lambda item: not item[2])
+        rejected = 0
+        for key, ob, reliable in candidates:
             if key in used:
                 continue  # одно наблюдение на камеру за кадр, надёжные первыми
             if self.update(ob, reliable):
                 used[key] = ob.view.instance
+            else:
+                rejected += 1
+        if not used and rejected:
+            self.recover(candidates)
         if not used:  # совсем вслепую скорость затухает: машина могла притормозить или свернуть
             self.x[2:] *= BLIND_DECAY
         pose = self.pose_at(self.x[:2])
@@ -336,6 +357,38 @@ class GapFill:
         self.filled += 1
         status = "weak" if used else "predicted"
         return Estimate(pose.copy(), status, used, 0.3 if used else 0.0, estimate.tracked_2d)
+
+    def recover(self, candidates):
+        """Все наблюдения кадра отброшены: фильтр мог уехать сам (стартовал с ошибочной позы).
+
+        Неопределённость растёт, и, если две камеры несколько кадров подряд сходятся в одной точке,
+        фильтр перезапускается от их триангуляции."""
+        position = self.P[:2, :2]
+        if np.sqrt(np.trace(position) / 2) < INFLATE_MAX_M:
+            self.P[:2, :2] = position * INFLATE ** 2
+        best = None
+        for (ka, a, _), (kb, b, _) in combinations(candidates, 2):
+            if ka == kb or a.clipped or b.clipped:
+                continue
+            point, gap = triangulate_pair(a.view.ray(a.center), b.view.ray(b.center))
+            if point is None or gap > 0.3 * self.model.size:
+                continue
+            pose = self.pose_at(point[:2])
+            if not self.inside_scene(pose):
+                continue
+            quality = min(a.overlap(pose), b.overlap(pose))
+            if best is None or quality > best[0]:
+                best = quality, point
+        if best is None:
+            self.disagree = 0
+            return
+        self.disagree += 1
+        if self.disagree >= REACQUIRE_FRAMES:
+            # точка — центр рамок, а фильтр ведёт точку ответа: переводим через текущую позу
+            pose = with_center(self.pose_at(self.x[:2]), best[1], self.model)
+            self.x[:2] = pose[:2]
+            self.P[:2, :2] = np.eye(2) * REACQUIRE_SIGMA ** 2
+            self.disagree = 0
 
     def initial_guess(self):
         """До первого захвата: две камеры с согласованными лучами, иначе одна уверенная детекция."""

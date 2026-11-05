@@ -66,3 +66,20 @@ def test_triangulation_of_two_rays():
 def test_nothing_known_stays_empty():
     _, fill = make()
     assert fill.step(0, Estimate(None, "lost", {}, 0.0), {}).pose is None
+
+
+def test_tracker_forecast_is_taken_over():
+    _, fill = make()
+    drive(fill, 30)
+    forecast = Estimate(np.array([500.0, 500.0, 3.0, 0.0, 0.0]), "forecast", {}, 0.0)
+    out = fill.step(30, forecast, {})
+    assert out.status == "predicted"                               # прогноз трекера заменён своим
+    assert np.linalg.norm(out.pose[:3] - np.array([9.0, 0.0, 3.0])) < 0.5
+
+
+def test_single_camera_pose_is_less_certain():
+    _, fill = make()
+    fill.step(0, Estimate(np.array([0.0, 0.0, 3.0, 0.0, 0.0]), "multi", {}, 0.9), {})
+    multi = np.sqrt(fill.P[0, 0])
+    fill.step(1, Estimate(np.array([0.0, 0.0, 3.0, 0.0, 0.0]), "mono", {}, 0.9), {})
+    assert np.sqrt(fill.P[0, 0]) > 4 * multi
