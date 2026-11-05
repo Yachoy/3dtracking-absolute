@@ -4,26 +4,29 @@
 (Way2: кадры 0–46, 815–1041, 1418–1499, 1907–1932 — 396 кадров без координат).
 
 GapFill работает только с ВЫХОДОМ: состояние трекера не меняется, поэтому кадры, где трекер выдаёт
-позу, остаются бит в бит прежними. На кадре без позы ответ строится так:
+позу, остаются бит в бит прежними. На кадре без позы ответ даёт фильтр Калмана по точке ответа
+на плоскости дороги (x, y, vx, vy). Ведём именно точку ответа, а не центр CAD: она у кабины, в 10 м
+от центра, и при смене курса центр поворачивался бы вокруг неё, давая скачки ответа до 20 м.
+Курс поворачивается к направлению движения плавно, не больше `TURN_DEG` за кадр.
 
-1. Прогноз от последнего ответа. Скорость — наклон траектории за последнюю секунду надёжных кадров
-   трекера (а не сглаженная скорость трекера, которая в прогнозе затухает), высота — уровень дороги
-   по засечкам двумя и более камерами.
-2. Поправка по наблюдениям. Кандидаты: 2D-маски SAM2, которые трекер сопровождает после пропуска
-   YOLO (`tracked_2d`), маски, найденные трекером, но отброшенные (ему для захвата нужны две
-   камеры), и YOLO с порогом 0,05 в окне вокруг проекции прогноза — дым и пыль на белой фуре роняют
-   уверенность до 0,05–0,15 (Way2, кадр 816, камера 4).
-   * две камеры с согласованными лучами — триангуляция центра;
-   * одна камера — направление на фуру надёжно, дальность нет: берём ближайшую к прогнозу точку
-     луча, то есть правим только поперечную к лучу составляющую. Скорость прогноза на таких
-     поправках не учится.
-   Кандидат принимается, если силуэт CAD в новой позе совпадает с маской.
-3. Плавность. Ответ тянется к измерению частично и не сдвигается за кадр дальше, чем позволяет
-   скорость машины (`step_limit`): никаких рывков на десятки метров внутри провала.
-4. До первого захвата — триангуляция двух свежих детекций с согласованными лучами, а если вторая
-   камера фуру не видит — оценка по одной уверенной детекции.
+* Прогноз — постоянная скорость с шумом ускорения (`ACCEL_SIGMA`). Начальная скорость — наклон
+  траектории за последнюю секунду надёжных кадров трекера. Высота — уровень дороги по кадрам `multi`.
+* Измерения по камерам, каждое со своей точностью:
+  - направление на центр рамки (по горизонтали) — надёжно; если рамка обрезана краем кадра,
+    вместо центра берётся её видимая сторона против крайней точки проекции CAD;
+  - дальность по высоте рамки — слабо: на Way2 высота рамки в среднем 0,87 высоты проекции CAD
+    при разбросе 0,62–1,15, поэтому поправка на 0,87 и погрешность 30 %;
+  - две и больше камер фильтр складывает сам — получается триангуляция.
+  Источники: 2D-маски SAM2 (`tracked_2d`), маски трекера, которые он не принял (для захвата ему
+  нужны две камеры), и YOLO с порогом 0,05 около проекции прогноза — дым и пыль роняют уверенность
+  YOLO на белой фуре до 0,05–0,15. Последние два источника — только если рамка была и на прошлом
+  кадре (защита от одиночных ложных срабатываний).
+* Измерение, несовместимое с прогнозом с учётом обеих неопределённостей (расстояние Махаланобиса
+  больше 3σ), отбрасывается. Так ошибочная маска не утаскивает ответ (v2: 172 м на кадре 1042).
+* Ответ не сдвигается за кадр дальше `max(1,5 м, 2 × предельная скорость / fps)`.
+* До первого захвата — триангуляция двух свежих детекций, иначе одна уверенная детекция; дальше
+  тот же фильтр с большой начальной неопределённостью.
 
-Каждая оценка проверяется на правдоподобие: внутри зоны камер и не глубоко под ними.
 Используются только текущий и прошлые кадры — режим остаётся причинным.
 """
 from collections import deque
@@ -31,27 +34,36 @@ from itertools import combinations
 
 import numpy as np
 
-from online.geometry import Observation, View, center_of, with_center
+from online.geometry import Observation, Rot, View, center_of, with_center
 from online.tracker import Estimate, box_overlap
 
 FILLED = ("predicted", "weak", "guess")
-DECAY = 0.99             # затухание скорости за кадр в прогнозе (полжизни ~2,3 с на 30 кадр/с)
-HISTORY_S = 1.0          # окно для скорости по надёжным кадрам трекера
+HISTORY_S = 1.0          # окно для начальной скорости по надёжным кадрам трекера
+ACCEL_SIGMA = 1.5        # м/с² — шум ускорения в прогнозе (повороты, разгон)
+BLIND_DECAY = 1.0        # затухание скорости вслепую: 1 — постоянная скорость (на Way2 лучше по сумме стыков 1042 и 1500)
+RESET_POS_SIGMA = 0.5    # м — неопределённость позы трекера на последнем кадре
+RESET_VEL_SIGMA = 1.5    # м/с
+GUESS_POS_SIGMA = 15.0
+GUESS_VEL_SIGMA = 6.0
+CENTER_PX = 6.0          # погрешность направления на центр рамки: max(6 px, 12 % ширины)
+CENTER_REL = 0.12
+EDGE_REL = 0.15          # видимая сторона обрезанной рамки: 15 % ширины проекции
+HEIGHT_RATIO = 0.87      # высота рамки / высота проекции CAD (медиана по Way2)
+HEIGHT_REL = 0.30
+HEIGHT_MODE = "closer"   # "closer": высота рамки — только если она больше ожидаемой; "off" — не брать
+WEAK_SCALE = 1.5         # слабые детекции и отброшенные маски — погрешность в 1,5 раза больше
+GATE = {1: 8.8, 2: 11.6}  # χ² на 99,7 % — порог Махаланобиса
 WEAK_CONF = 0.05
-MATCH_OVERLAP = 0.35     # силуэт CAD против маски для поправки
-NEAR_PROJECTION = 0.30   # слабая детекция / отброшенная маска: IoU с проекцией прогноза
+NEAR_PROJECTION = 0.30
 GUESS_SCORE = 0.45
 GUESS_OVERLAP = 0.55
-PULL_SINGLE = 0.35       # доля поправки к измерению одной камеры за кадр
-PULL_PAIR = 0.6          # и к триангуляции двумя камерами
 BELOW_CAMERAS_M = 25.0
 SCENE_REACH = 1.2
 SCENE_MARGIN_M = 50.0
 RELIABLE = ("multi", "mono", "mask_multi")
-
-
-def closest_point(origin, ray, point):
-    return origin + ray * max(0.0, float((point - origin) @ ray))
+TURN_DEG = 1.5           # наибольший поворот курса за кадр в заполнении
+TURN_SPEED = 3.0         # м/с — ниже этой скорости курс по движению не меняем
+EDGE_PX = 4
 
 
 def triangulate_pair(a, b):
@@ -76,15 +88,18 @@ class GapFill:
         self.model = model
         self.fps = fps
         self.pose = None             # последний выданный ответ
-        self.velocity = np.zeros(3)  # м/кадр, центр CAD
-        self.altitude = None
+        self.template = None         # поза-шаблон (курс, наклон) последнего кадра трекера
+        self.yaw = None
+        self.x = None                # [x, y, vx, vy] точки ответа, м и м/кадр
+        self.P = None
+        self.answer_z = None         # высота точки ответа на дороге
         self.history = deque(maxlen=max(2, round(HISTORY_S * fps)))
+        self.previous_boxes = {}     # рамки-кандидаты прошлого кадра по камерам
         self.gap = 0
         self.filled = 0
 
     # ------------------------------------------------------------------ helpers
     def step_limit(self):
-        """Наибольший сдвиг ответа за кадр: как у трекера — две предельные скорости, не меньше 1,5 м."""
         return max(1.5, 2 * self.model.speed / self.fps)
 
     def inside_scene(self, pose):
@@ -99,44 +114,65 @@ class GapFill:
             return False
         return center[2] >= locs[:, 2].min() - BELOW_CAMERAS_M
 
-    def road_center_z(self, pose):
-        if self.altitude is None:
-            return None
-        return center_of(np.r_[pose[:2], self.altitude, pose[3:]], self.model)[2]
+    def pose_at(self, xy):
+        """Поза из точки ответа на дороге и текущего курса."""
+        pose = self.template.copy()
+        pose[0], pose[1] = xy
+        if self.answer_z is not None and self.model.ground_vehicle:
+            pose[2] = self.answer_z
+        if self.yaw is not None:
+            pose[3] = self.yaw
+        return pose
+
+    def turn(self):
+        """Курс плавно к направлению движения."""
+        if not self.model.ground_vehicle or np.linalg.norm(self.x[2:]) * self.fps < TURN_SPEED:
+            return
+        course = np.arctan2(self.x[3], self.x[2])
+        change = (course - self.yaw + np.pi) % (2 * np.pi) - np.pi
+        self.yaw += float(np.clip(change, -np.radians(TURN_DEG), np.radians(TURN_DEG)))
+
+    def reset(self, pose, velocity, pos_sigma, vel_sigma):
+        self.template = np.asarray(pose, float).copy()
+        self.yaw = float(self.template[3]) if len(self.template) > 3 else None
+        self.x = np.r_[self.template[:2], velocity[:2]]
+        self.P = np.diag([pos_sigma ** 2] * 2 + [(vel_sigma / self.fps) ** 2] * 2)
 
     def remember(self, frame, pose, status):
+        point = np.asarray(pose[:3], float)
         if status in RELIABLE:
-            self.history.append((frame, center_of(pose, self.model)))
-            if status == "multi":
-                self.altitude = pose[2] if self.altitude is None else 0.8 * self.altitude + 0.2 * pose[2]
-            if len(self.history) >= 4:
-                frames = np.array([f for f, _ in self.history], float)
-                centers = np.array([c for _, c in self.history])
-                slope = np.polyfit(frames - frames[-1], centers, 1)[0]
-                if self.model.ground_vehicle:
-                    slope[2] = 0.0
-                limit = self.model.speed / self.fps
-                self.velocity = slope * min(1.0, limit / max(np.linalg.norm(slope), 1e-9))
+            self.history.append((frame, point))
+        if status == "multi":
+            self.answer_z = point[2] if self.answer_z is None else 0.8 * self.answer_z + 0.2 * point[2]
+        velocity = np.zeros(3)
+        if len(self.history) >= 4:
+            frames = np.array([f for f, _ in self.history], float)
+            centers = np.array([c for _, c in self.history])
+            velocity = np.polyfit(frames - frames[-1], centers, 1)[0]
+            limit = self.model.speed / self.fps
+            velocity *= min(1.0, limit / max(np.linalg.norm(velocity[:2]), 1e-9))
+        self.reset(pose, velocity, RESET_POS_SIGMA, RESET_VEL_SIGMA)
 
+    # ---------------------------------------------------------- measurements
     def candidates(self, images, predicted, tracked_2d):
-        """Наблюдения по камерам: 2D-маски SAM2, маски трекера и слабые детекции около прогноза."""
-        found = {}
-        near = {}  # проекция прогноза по камерам: слабые детекции и отброшенные маски должны быть рядом
+        """[(камера, наблюдение, надёжное ли)] — маски SAM2, маски трекера, слабые детекции."""
+        near = {}
         for key, view in self.tracker.current_views.items():
-            box = view.box(predicted) if predicted is not None else None
+            box = view.box(predicted)
             if box is not None:
                 near[key] = box
+        found = []
         for key, instance in (tracked_2d or {}).items():
             view = self.tracker.current_views.get(key)
             if view is not None:
-                found.setdefault(key, []).append(Observation(View.of(view.camera, instance, self.model)))
+                found.append((key, Observation(View.of(view.camera, instance, self.model)), True))
+        weak = []
         for key, group in (getattr(self.tracker, "groups", None) or {}).items():
-            found.setdefault(key, []).extend(ob for ob in group if not ob.view.instance.flow
-                                             and key in near and box_overlap(ob.box, near[key]) >= NEAR_PROJECTION)
+            weak.extend((key, ob) for ob in group if not ob.view.instance.flow)
         windows = []
         for key, view in self.tracker.current_views.items():
-            box = view.box(predicted) if predicted is not None else None
-            if box is None or key not in images or key in found:
+            box = near.get(key)
+            if box is None or key not in images or key in (tracked_2d or {}):
                 continue
             width, height = view.camera.width, view.camera.height
             if box[2] < 0 or box[3] < 0 or box[0] > width or box[1] > height or min(box[2:] - box[:2]) < 8:
@@ -149,68 +185,116 @@ class GapFill:
         if windows and segmenter is not None and hasattr(segmenter, "detect"):
             for key, instances in segmenter.detect(windows, 640, WEAK_CONF).items():
                 view = self.tracker.current_views[key]
-                found.setdefault(key, []).extend(Observation(View.of(view.camera, item, self.model))
-                                                 for item in instances
-                                                 if key in near and box_overlap(item.box, near[key]) >= NEAR_PROJECTION)
+                weak.extend((key, Observation(View.of(view.camera, item, self.model))) for item in instances)
         labels = self.model.labels
-        return {key: [ob for ob in obs if not labels or ob.view.instance.label < 0 or ob.view.instance.label in labels]
-                for key, obs in found.items()}
+        boxes = {}
+        for key, ob in weak:
+            label = ob.view.instance.label
+            if labels and label >= 0 and label not in labels:
+                continue
+            if key not in near or box_overlap(ob.box, near[key]) < NEAR_PROJECTION:
+                continue
+            boxes.setdefault(key, []).append(ob.box)
+            # одиночные срабатывания не берём: рамка должна быть и на прошлом кадре
+            if any(box_overlap(ob.box, old) >= 0.3 for old in self.previous_boxes.get(key, ())):
+                found.append((key, ob, False))
+        for key, ob, reliable in found:
+            if reliable:
+                boxes.setdefault(key, []).append(ob.box)
+        self.previous_boxes = boxes
+        return found
 
-    def single_point(self, observation, center):
-        """Ближайшая к прогнозу точка луча: правится только поперечная к лучу составляющая.
+    def measurement_model(self, observation):
+        """(h, измерение, погрешности, прогноз измерения) для одного наблюдения или None."""
+        view = observation.view
+        width, height = view.camera.width, view.camera.height
+        box = observation.box
+        clip_left, clip_right = box[0] < EDGE_PX, box[2] > width - EDGE_PX
+        clip_top, clip_bottom = box[1] < EDGE_PX, box[3] > height - EDGE_PX
+        if (clip_left and clip_right) or min(box[2:] - box[:2]) < 6:
+            return None
+        vertices = self.model.vertices
+        use_height = not (clip_top or clip_bottom)
 
-        Дальность по одной камере не берём: ни по размеру маски (пыль прячет часть фуры), ни по
-        пересечению луча с дорогой (рельеф и неточная высота — Way2, кадры 853–901: ответ уехал
-        по лучу камеры 4 назад на 40 м, а потом прогноз выучил эту ложную скорость)."""
-        origin, ray = observation.view.ray(observation.center)
-        return closest_point(origin, ray, center)
+        def h(xy):
+            pose = self.pose_at(xy)
+            uv, depth = view.project(vertices @ Rot(*pose[3:]).T + pose[:3])
+            if depth.min() < 1:
+                return None
+            if clip_left:
+                values = [uv[:, 0].max()]
+            elif clip_right:
+                values = [uv[:, 0].min()]
+            else:
+                values = [view.project(center_of(pose, self.model)[None])[0][0, 0]]
+            if use_height:
+                values.append(HEIGHT_RATIO * (uv[:, 1].max() - uv[:, 1].min()))
+            return np.array(values), uv
 
-    def measure(self, images, predicted, tracked_2d):
-        """Лучшая поправка: (точка центра, доля, камеры, наблюдение) или None."""
-        center = center_of(predicted, self.model)
-        groups = self.candidates(images, predicted, tracked_2d)
-        reach = max(6.0, 0.6 * self.model.size) + 0.5 * self.gap * np.linalg.norm(self.velocity) + 0.15 * self.gap
-        best = None
-        flat = [(key, ob) for key, obs in groups.items() for ob in obs]
-        for (ka, a), (kb, b) in combinations(flat, 2):
-            if ka == kb or a.clipped or b.clipped:
-                continue
-            point, gap = triangulate_pair(a.view.ray(a.center), b.view.ray(b.center))
-            if point is None or gap > 0.3 * self.model.size or np.linalg.norm(point - center) > reach:
-                continue
-            pose = with_center(predicted, point, self.model)
-            if not self.inside_scene(pose):
-                continue
-            quality = min(a.overlap(pose), b.overlap(pose))
-            if quality >= MATCH_OVERLAP and (best is None or 1 + quality > best[0]):
-                best = 1 + quality, point, PULL_PAIR, (ka, kb), a, quality
-        if best is not None:
-            return best[1:]
-        for key, ob in flat:
-            point = self.single_point(ob, center)
-            if np.linalg.norm(point - center) > reach:
-                continue
-            pose = with_center(predicted, point, self.model)
-            if not self.inside_scene(pose):
-                continue
-            quality = ob.overlap(pose)
-            score = quality * np.sqrt(max(ob.view.instance.score, 1e-3)) * (0.7 if ob.clipped else 1.0)
-            if quality >= MATCH_OVERLAP and (best is None or score > best[0]):
-                best = score, point, PULL_SINGLE, (key,), ob, quality
-        return None if best is None else best[1:]
+        first = h(self.x[:2])
+        if first is None:
+            return None
+        predicted, uv = first
+        proj_width = max(uv[:, 0].max() - uv[:, 0].min(), 1.0)
+        if clip_left or clip_right:
+            measured = [box[2] if clip_left else box[0]]
+            sigma = [max(CENTER_PX, EDGE_REL * proj_width)]
+        else:
+            measured = [(box[0] + box[2]) / 2]
+            sigma = [max(CENTER_PX, CENTER_REL * (box[2] - box[0]))]
+        if use_height:
+            measured.append(box[3] - box[1])
+            sigma.append(max(CENTER_PX, HEIGHT_REL * (box[3] - box[1])))
+        return h, np.array(measured), np.array(sigma), predicted
 
-    def move_to(self, target_center, base_pose):
-        """Сдвиг ответа к цели с ограничением на кадр."""
-        current = center_of(self.pose, self.model)
-        step = target_center - current
-        limit = self.step_limit()
-        if np.linalg.norm(step) > limit:
-            step *= limit / np.linalg.norm(step)
-        pose = with_center(base_pose, current + step, self.model)
-        if self.model.ground_vehicle and np.linalg.norm(self.velocity[:2]) * self.fps > 1.0:
-            pose[3] = np.arctan2(self.velocity[1], self.velocity[0])  # курс по движению
-            pose = with_center(pose, current + step, self.model)
-        return pose
+    def update(self, observation, reliable):
+        """Шаг фильтра по одному наблюдению; True, если принято."""
+        model = self.measurement_model(observation)
+        if model is None:
+            return False
+        h, z, sigma, predicted = model
+        if not reliable:
+            sigma = sigma * WEAK_SCALE
+        delta = 0.3
+        J = np.zeros((len(z), 4))
+        for axis in range(2):
+            step = np.zeros(2)
+            step[axis] = delta
+            plus, minus = h(self.x[:2] + step), h(self.x[:2] - step)
+            if plus is None or minus is None:
+                return False
+            J[:, axis] = (plus[0] - minus[0]) / (2 * delta)
+        residual = z - predicted
+        if len(z) == 2 and (HEIGHT_MODE == "off" or (HEIGHT_MODE == "closer" and residual[1] < 0)):
+            # рамка ниже ожидаемой — это может быть закрытие (дерево, пыль), а не дальность:
+            # закрытие делает рамку только меньше, поэтому верим высоте, лишь когда фура «ближе»
+            z, predicted, sigma, J, residual = z[:1], predicted[:1], sigma[:1], J[:1], residual[:1]
+        S = J @ self.P @ J.T + np.diag(sigma ** 2)
+        distance = float(residual @ np.linalg.solve(S, residual))
+        if distance > GATE.get(len(z), 11.6):
+            return False
+        K = self.P @ J.T @ np.linalg.inv(S)
+        x = self.x + K @ residual
+        if not self.inside_scene(self.pose_at(x[:2])):
+            return False
+        self.x = x
+        self.P = (np.eye(4) - K @ J) @ self.P
+        speed = np.linalg.norm(self.x[2:])
+        limit = self.model.speed / self.fps
+        if speed > limit:
+            self.x[2:] *= limit / speed
+        return True
+
+    def predict(self):
+        F = np.eye(4)
+        F[0, 2] = F[1, 3] = 1.0
+        q = (ACCEL_SIGMA / self.fps ** 2) ** 2
+        block = q * np.array([[0.25, 0.5], [0.5, 1.0]])
+        Q = np.zeros((4, 4))
+        Q[np.ix_([0, 2], [0, 2])] = block
+        Q[np.ix_([1, 3], [1, 3])] = block
+        self.x = F @ self.x
+        self.P = F @ self.P @ F.T + Q
 
     # --------------------------------------------------------------------- step
     def step(self, frame, estimate, images):
@@ -221,40 +305,37 @@ class GapFill:
             return estimate
 
         self.gap += 1
-        if self.pose is None:
+        if self.x is None:
             guess = self.initial_guess()
             if guess is None:
                 return estimate
+            self.reset(guess, np.zeros(3), GUESS_POS_SIGMA, GUESS_VEL_SIGMA)
             self.pose = guess
             self.filled += 1
             return Estimate(guess.copy(), "guess", {}, 0.0, estimate.tracked_2d)
 
-        self.velocity *= DECAY
-        predicted = self.pose.copy()
-        predicted = with_center(predicted, center_of(predicted, self.model) + self.velocity, self.model)
-        road = self.road_center_z(predicted)
-        if road is not None and self.model.ground_vehicle:
-            target = center_of(predicted, self.model)
-            target[2] = road
-            predicted = with_center(predicted, target, self.model)
-        measured = self.measure(images, predicted, estimate.tracked_2d)
-        if measured is None:
-            target = center_of(predicted, self.model)
-            status, views, quality = "predicted", {}, 0.0
-        else:
-            point, pull, keys, ob, quality = measured
-            target = center_of(predicted, self.model) + pull * (point - center_of(predicted, self.model))
-            if len(keys) > 1:  # скорость учим только на триангуляции: одна камера даёт лишь направление
-                change = target - center_of(self.pose, self.model)
-                self.velocity += 0.10 * (change - self.velocity)
-                if self.model.ground_vehicle:
-                    self.velocity[2] = 0.0
-                limit = self.model.speed / self.fps
-                self.velocity *= min(1.0, limit / max(np.linalg.norm(self.velocity), 1e-9))
-            status, views = "weak", {key: ob.view.instance for key in keys[:1]}
-        self.pose = self.move_to(target, predicted)
+        self.predict()
+        self.turn()
+        predicted = self.pose_at(self.x[:2])
+        used = {}
+        for key, ob, reliable in sorted(self.candidates(images, predicted, estimate.tracked_2d),
+                                        key=lambda item: not item[2]):
+            if key in used:
+                continue  # одно наблюдение на камеру за кадр, надёжные первыми
+            if self.update(ob, reliable):
+                used[key] = ob.view.instance
+        if not used:  # совсем вслепую скорость затухает: машина могла притормозить или свернуть
+            self.x[2:] *= BLIND_DECAY
+        pose = self.pose_at(self.x[:2])
+        if self.pose is not None:  # плавность: точка ответа не дальше step_limit за кадр
+            move = pose[:3] - self.pose[:3]
+            limit = self.step_limit()
+            if np.linalg.norm(move) > limit:
+                pose[:3] = self.pose[:3] + move * limit / np.linalg.norm(move)
+        self.pose = pose
         self.filled += 1
-        return Estimate(self.pose.copy(), status, views, quality, estimate.tracked_2d)
+        status = "weak" if used else "predicted"
+        return Estimate(pose.copy(), status, used, 0.3 if used else 0.0, estimate.tracked_2d)
 
     def initial_guess(self):
         """До первого захвата: две камеры с согласованными лучами, иначе одна уверенная детекция."""
@@ -268,14 +349,12 @@ class GapFill:
             point, gap = triangulate_pair(a.view.ray(a.center), b.view.ray(b.center))
             if point is None or gap > 0.3 * self.model.size:
                 continue
-            pose = self.tracker.fit_pose([a, b], None)
-            pose = with_center(pose, point, self.model)
+            pose = with_center(self.tracker.fit_pose([a, b], None), point, self.model)
             if not self.inside_scene(pose):
                 continue
             quality = min(a.overlap(pose), b.overlap(pose))
-            score = 2 + quality
-            if quality >= 0.25 and (best is None or score > best[0]):
-                best = score, pose
+            if quality >= 0.25 and (best is None or 2 + quality > best[0]):
+                best = 2 + quality, pose
         if best is None:
             for key, ob in fresh:
                 if ob.view.instance.score < GUESS_SCORE or min(ob.size) < 18:
@@ -285,13 +364,4 @@ class GapFill:
                     continue
                 if best is None or ob.view.instance.score > best[0]:
                     best = ob.view.instance.score, pose
-        if best is None:
-            return None
-        pose = best[1]
-        if self.pose is not None:  # плавно и для серии первых оценок
-            current = center_of(self.pose, self.model)
-            step = center_of(pose, self.model) - current
-            limit = self.step_limit()
-            if np.linalg.norm(step) > limit:
-                pose = with_center(pose, current + step * limit / np.linalg.norm(step), self.model)
-        return pose
+        return None if best is None else best[1]

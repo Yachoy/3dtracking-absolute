@@ -15,7 +15,7 @@ repo = Path(sys.argv[1]).resolve()
 sys.path.insert(0, str(repo))
 from core.camera import Camera  # noqa: E402
 from online.estimation import gap_fill as G  # noqa: E402
-from online.geometry import DEFAULT_TARGET as M, View, center_of  # noqa: E402
+from online.geometry import DEFAULT_TARGET as M, View  # noqa: E402
 from online.perception.vision import Instance  # noqa: E402
 from online.run import sources  # noqa: E402
 from online.tracker import Estimate  # noqa: E402
@@ -37,6 +37,8 @@ def box_instance(b):
 
 
 tracker = SimpleNamespace(current_views={}, groups={}, segmenter=None)
+course = 0.0
+reliable = []
 fill = G.GapFill(tracker, M, 30.0)
 out, status = {}, {}
 for f in replay:
@@ -44,12 +46,21 @@ for f in replay:
     tracker.current_views = views(i)
     pose = None
     if f["xyz"][0] is not None:
-        yaw, pitch, _ = np.deg2rad(f.get("yaw_pitch_roll_deg") or [0, 0, 0])
+        if f.get("yaw_pitch_roll_deg"):
+            yaw, pitch, _ = np.deg2rad(f["yaw_pitch_roll_deg"])
+        else:  # для наземной машины курс в replay не пишется — берём его по надёжным кадрам траектории
+            here = np.array(f["xyz"]) / 100
+            if f["status"] in ("multi", "mono"):
+                reliable.append((i, here))
+            past = [p for j, p in reliable if i - 45 <= j <= i - 15]
+            if past and np.linalg.norm(here[:2] - past[0][:2]) > 5:
+                course = np.arctan2(*(here[:2] - past[0][:2])[::-1])
+            yaw, pitch = course, 0.0
         pose = np.r_[np.array(f["xyz"]) / 100, yaw, pitch]
     tracked = {int(k): box_instance(b) for k, b in (f.get("tracked_2d_boxes") or {}).items()}
     est = fill.step(i, Estimate(pose, f["status"] if pose is not None else "lost", {}, 0.0, tracked), {})
     if est.pose is not None:
-        out[i], status[i] = center_of(est.pose, M), est.status
+        out[i], status[i] = np.asarray(est.pose[:3], float), est.status  # точка ответа, как в trajectory.csv
 for a, b in ((815, 1041), (1418, 1499), (1907, 1932)):
     steps = [np.linalg.norm(out[i] - out[i - 1]) for i in range(a, min(b + 2, len(replay))) if i in out and i - 1 in out]
     ret = np.linalg.norm(out[b + 1] - out[b]) if b + 1 in out and b in out else None
@@ -59,7 +70,7 @@ for a, b in ((815, 1041), (1418, 1499), (1907, 1932)):
 allsteps = [np.linalg.norm(out[i] - out[i - 1]) for i in out if i - 1 in out]
 print("шагов > 10 м всего:", sum(s > 10 for s in allsteps))
 base = {f["frame"]: np.array(f["xyz"]) / 100 for f in replay if f["xyz"][0] is not None}
-bc = {i: center_of(np.r_[p, 0, 0], M) for i, p in base.items()}
+bc = base
 print("база: шагов > 10 м:", [i for i in bc if i - 1 in bc and np.linalg.norm(bc[i] - bc[i - 1]) > 10])
 print("с заполнением:", [(i, status.get(i - 1), round(float(np.linalg.norm(out[i] - out[i - 1])), 1)) for i in out
                          if i - 1 in out and np.linalg.norm(out[i] - out[i - 1]) > 10])

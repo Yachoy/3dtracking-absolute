@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from online.estimation.gap_fill import GapFill, triangulate_pair
-from online.geometry import DEFAULT_TARGET, center_of
+from online.geometry import DEFAULT_TARGET
 from online.tracker import Estimate
 
 
@@ -27,23 +27,31 @@ def test_tracker_pose_passes_through_unchanged():
 def test_gap_continues_recent_motion_on_the_road():
     _, fill = make()
     drive(fill, 30)
-    start = center_of(fill.pose, DEFAULT_TARGET)
+    start = fill.pose[:3].copy()
     out = [fill.step(30 + i, Estimate(None, "lost", {}, 0.0), {}) for i in range(30)]
     assert all(e.status == "predicted" and e.pose is not None for e in out)
     assert np.isclose(out[-1].pose[2], 3.0, atol=1e-6)            # высота дороги
-    moved = center_of(out[-1].pose, DEFAULT_TARGET) - start
-    assert 7.0 < moved[0] < 8.5 and abs(moved[1]) < 1e-6           # 30 кадров × 0,3 м с затуханием
-    steps = [np.linalg.norm(center_of(b.pose, DEFAULT_TARGET) - center_of(a.pose, DEFAULT_TARGET))
-             for a, b in zip(out, out[1:])]
+    moved = out[-1].pose[:3] - start
+    assert 8.5 < moved[0] < 9.5 and abs(moved[1]) < 1e-6           # 30 кадров × 0,3 м
+    steps = [np.linalg.norm(b.pose[:3] - a.pose[:3]) for a, b in zip(out, out[1:])]
     assert max(steps) < 0.31
+
+
+def test_first_filled_frame_continues_tracker_answer():
+    _, fill = make()
+    drive(fill, 30)
+    last = fill.pose[:3].copy()
+    first = fill.step(30, Estimate(None, "lost", {}, 0.0), {})
+    assert np.linalg.norm(first.pose[:3] - last) < 0.31            # без скачка на входе в провал
 
 
 def test_step_is_limited():
     _, fill = make()
     drive(fill, 5, step=0.0)
-    before = center_of(fill.pose, DEFAULT_TARGET)
-    pose = fill.move_to(before + np.array([50.0, 0.0, 0.0]), fill.pose)
-    assert np.isclose(np.linalg.norm(center_of(pose, DEFAULT_TARGET) - before), fill.step_limit())
+    before = fill.pose[:3].copy()
+    fill.x[:2] += 50.0                                             # фильтр «увидел» машину далеко
+    out = fill.step(5, Estimate(None, "lost", {}, 0.0), {})
+    assert np.isclose(np.linalg.norm(out.pose[:3] - before), fill.step_limit())
 
 
 def test_triangulation_of_two_rays():
